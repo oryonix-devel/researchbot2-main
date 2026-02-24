@@ -1,0 +1,27 @@
+openapi: 3.0.0More actions
+info:
+  title: Hello World API
+  description: A simple API that accepts any request and responds.
+  version: 1.0.0
+
+paths:
+  /hello:
+    post:
+      summary: Accepts any request and responds with the same structure
+      operationId: hello_world
+      requestBody:
+        description: Any valid JSON object
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: Successfully echoes the input
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true

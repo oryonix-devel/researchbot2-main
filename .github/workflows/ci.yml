@@ -1,0 +1,57 @@
+name: sample-hello-world
+
+on:
+  push:
+    branches:
+      - "**"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+  
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install WASM dependencies
+        run: |
+          wget https://github.com/WebAssembly/binaryen/releases/download/version_117/binaryen-version_117-x86_64-linux.tar.gz -O binaryen.tar.gz
+          tar xvzf binaryen.tar.gz
+          cp binaryen-version_117/bin/wasm-merge /usr/local/bin
+          cp binaryen-version_117/bin/wasm-opt /usr/local/bin
+          rm -rf binaryen.tar.gz binaryen-version_117
+
+      - name: Install Onix dependencies
+        run: |
+          mkdir -p wheels
+
+          ONIX_CLIENT_VERSION=$(wget -qO- https://oryonix-cloud.s3.us-west-2.amazonaws.com/packages/onix-client/latest.txt | tr -d '[:space:]')
+          wget -P wheels https://oryonix-cloud.s3.us-west-2.amazonaws.com/packages/onix-client/onix_client-${ONIX_CLIENT_VERSION}-py3-none-any.whl
+
+          ONIX_CLI_VERSION=$(wget -qO- https://oryonix-cloud.s3.us-west-2.amazonaws.com/packages/onix-cli/latest.txt | tr -d '[:space:]')
+          wget -P wheels https://oryonix-cloud.s3.us-west-2.amazonaws.com/packages/onix-cli/onix_cli-${ONIX_CLI_VERSION}-py3-none-any.whl
+
+          pip install wheels/*
+      
+      - name: Build binaries
+        run:
+          onix-cli service build
+        env:
+          ONIX_SERVER_URL: ${{ secrets.ONIX_SERVER_URL }}
+          ONIX_CLIENT_ID: ${{ secrets.ONIX_CLIENT_ID }}
+          ONIX_SECRET_KEY: ${{ secrets.ONIX_SECRET_KEY }}
+          ONIX_APPLICATION_ID: ${{ vars.ONIX_APPLICATION_ID }}
+          ONIX_SERVICE_NAME: ${{ vars.ONIX_SERVICE_NAME }}
+
+      - name: Upload aritfacts & spec
+        run:
+          onix-cli service upload
+        env:
+          ONIX_SERVER_URL: ${{ secrets.ONIX_SERVER_URL }}
+          ONIX_CLIENT_ID: ${{ secrets.ONIX_CLIENT_ID }}
+          ONIX_SECRET_KEY: ${{ secrets.ONIX_SECRET_KEY }}
+          ONIX_APPLICATION_ID: ${{ vars.ONIX_APPLICATION_ID }}
+          ONIX_SERVICE_NAME: ${{ vars.ONIX_SERVICE_NAME }}
