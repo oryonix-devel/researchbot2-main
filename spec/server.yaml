@@ -1,27 +1,305 @@
-openapi: 3.0.0More actions
+openapi: 3.0.0
+
 info:
-  title: Hello World API
-  description: A simple API that accepts any request and responds.
-  version: 1.0.0
+  title: Oryonix ResearchBot2 — Main Service
+  description: >
+    Research evaluation pipeline service backed by Temporal durable workflows.
+    Streams ordered JSON chunks for each pipeline stage.
+    Human approval gate is implemented as a signal endpoint.
+    All workflows are identified by the client-supplied request_id.
+  version: "1.0.0"
+  contact:
+    name: Oryonix Platform Engineering
+
+servers:
+  - url: /
 
 paths:
-  /hello:
+
+  /api/run:
     post:
-      summary: Accepts any request and responds with the same structure
-      operationId: hello_world
+      summary: Start research evaluation pipeline
+      description: >
+        Starts a new durable research evaluation workflow.
+        The client MUST supply a globally unique request_id.
+        The workflow is assigned the flow ID "research:{request_id}".
+        The response is a pull-based stream of JSON chunks.
+        Each chunk conforms to the ResearchChunk schema.
+        The stream is terminated by the platform-appended STREAM_COMPLETED sentinel.
+
+        Pipeline stages executed serially:
+          1. structural_decomposition
+          2. evidence_extraction
+          3. risk_analysis
+          4. comparative_context_generation
+          5. executive_summary_synthesis
+
+        After stage 5 completes the workflow pauses at the human approval gate
+        (stage: awaiting_approval). Resume by calling POST /api/approval.
+      operationId: run_research_pipeline
       requestBody:
-        description: Any valid JSON object
         required: true
         content:
           application/json:
             schema:
-              type: object
-              additionalProperties: true
+              $ref: "#/components/schemas/RunPipelineRequest"
+            examples:
+              basic:
+                summary: Typical invocation
+                value:
+                  request_id: "abc123"
+                  abstract: "This study examines the effect of sleep deprivation on cognitive performance..."
+                  gemini_api_key: "AIza..."
       responses:
         "200":
-          description: Successfully echoes the input
+          description: >
+            Streaming response. Each line is a JSON object conforming to ResearchChunk.
+            The stream ends with the platform-appended STREAM_COMPLETED sentinel.
+          content:
+            application/x-ndjson:
+              schema:
+                $ref: "#/components/schemas/ResearchChunk"
+        "400":
+          description: Validation error — request_id, abstract, or gemini_api_key missing or invalid.
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: A workflow with this request_id already exists.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal platform error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/approval:
+    post:
+      summary: Submit human approval or rejection decision
+      description: >
+        Sends a signal to a paused research evaluation workflow.
+        The target workflow must be paused at the awaiting_approval stage.
+        The flow_id in the payload must match exactly: "research:{request_id}".
+
+        If approved=true the workflow proceeds to emit a pipeline_complete chunk
+        and terminates.
+
+        If approved=false the workflow begins a refinement iteration using
+        the provided critique. Only the original abstract, last executive summary,
+        and critique are passed to the refinement model call. The loop is unlimited.
+      operationId: submit_approval
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApprovalRequest"
+            examples:
+              approve:
+                summary: Approve the current summary
+                value:
+                  flow_id: "research:abc123"
+                  approved: true
+                  critique: ""
+              reject:
+                summary: Reject with critique
+                value:
+                  flow_id: "research:abc123"
+                  approved: false
+                  critique: "The risk assessment is too optimistic. Please strengthen the methodological risk section."
+      responses:
+        "200":
+          description: Signal accepted. Workflow will resume asynchronously.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalResponse"
+        "400":
+          description: Validation error — flow_id missing or approved field invalid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: No workflow found for the given flow_id, or workflow is not paused at approval gate.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal platform error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  schemas:
+
+    RunPipelineRequest:
+      type: object
+      required:
+        - request_id
+        - abstract
+        - gemini_api_key
+      properties:
+        request_id:
+          type: string
+          description: >
+            Client-supplied globally unique identifier for this research evaluation run.
+            Used to construct the immutable flow ID: "research:{request_id}".
+            Must be present; no auto-generation fallback exists.
+          example: "abc123"
+          minLength: 1
+        abstract:
+          type: string
+          description: >
+            Full text of the research abstract to be evaluated.
+          example: "This study examines the effect of sleep deprivation on cognitive performance..."
+          minLength: 1
+        gemini_api_key:
+          type: string
+          description: >
+            Gemini API key. Passed through to all pipeline stage compute functions.
+            Never stored by the platform beyond the workflow execution context.
+          example: "AIzaSy..."
+          minLength: 1
+
+    ApprovalRequest:
+      type: object
+      required:
+        - flow_id
+        - approved
+        - critique
+      properties:
+        flow_id:
+          type: string
+          description: >
+            Exact flow ID of the target workflow. Format: "research:{request_id}".
+            Must match the flow_id emitted in the awaiting_approval chunk exactly.
+          example: "research:abc123"
+          minLength: 1
+        approved:
+          type: boolean
+          description: >
+            true: accept the current executive summary; workflow terminates after
+            emitting a pipeline_complete chunk.
+            false: reject and trigger a refinement iteration using the critique.
+          example: false
+        critique:
+          type: string
+          description: >
+            Human reviewer feedback. Required by schema; provide empty string when
+            approved=true. Used exclusively in the refinement compute prompt.
+          example: "The risk assessment underweights methodological bias."
+
+    ApprovalResponse:
+      type: object
+      properties:
+        message:
+          type: string
+          description: Confirmation that the signal was accepted.
+          example: "Approval signal accepted for flow research:abc123."
+        flow_id:
+          type: string
+          description: Echo of the targeted flow_id.
+          example: "research:abc123"
+
+    ResearchChunk:
+      type: object
+      description: >
+        A single streaming chunk emitted by the research evaluation pipeline.
+        Chunks are ordered by the 'sequence' field, which is the authoritative
+        ordering mechanism. Do not rely on arrival order or chunk_id.
+      required:
+        - flow_id
+        - sequence
+        - stage
+        - status
+        - attempt
+        - artifact
+        - model
+        - timestamp
+      properties:
+        flow_id:
+          type: string
+          description: Immutable workflow identity. Format "research:{request_id}".
+          example: "research:abc123"
+        sequence:
+          type: integer
+          description: >
+            Monotonically increasing integer. Authoritative ordering field.
+            Maintained locally in-flow; does not correspond to database chunk_id.
+          example: 7
+          minimum: 1
+        stage:
+          type: string
+          description: Current pipeline stage or gate identifier.
+          enum:
+            - pipeline_started
+            - structural_decomposition
+            - evidence_extraction
+            - risk_analysis
+            - comparative_context_generation
+            - executive_summary_synthesis
+            - awaiting_approval
+            - refinement_started
+            - refined_executive_summary_synthesis
+            - pipeline_complete
+          example: "evidence_extraction"
+        status:
+          type: string
+          description: Current status of the stage.
+          enum:
+            - running
+            - started
+            - processing
+            - complete
+            - pending
+            - approved
+          example: "processing"
+        attempt:
+          type: integer
+          description: >
+            Current attempt number. Starts at 1 for the initial pipeline run.
+            Increments with each refinement iteration following a rejection.
+          example: 1
+          minimum: 1
+        artifact:
+          type: object
+          description: >
+            Stage-specific payload. Schema varies by stage.
+            Contains 'result' (Gemini response text) on completion chunks.
+            Contains 'message' on status/progress chunks.
+            Contains 'current_summary' or 'final_summary' on approval-gate chunks.
+          additionalProperties: true
+        model:
+          type: string
+          description: AI model backend label. Always "gemini" for this service.
+          example: "gemini"
+          enum:
+            - gemini
+        timestamp:
+          type: string
+          format: date-time
+          description: >
+            ISO-8601 UTC timestamp of chunk emission. Informational only.
+            Use 'sequence' for authoritative ordering.
+          example: "2024-11-15T10:23:45.123456Z"
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Machine-readable error code.
+          example: "VALIDATION_ERROR"
+        message:
+          type: string
+          description: Human-readable error description.
+          example: "request_id is required and must not be empty."
