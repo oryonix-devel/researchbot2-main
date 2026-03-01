@@ -82,19 +82,20 @@ paths:
     get:
       summary: Poll for streaming chunks from a running pipeline
       description: >
-        Platform-managed pull-based polling endpoint. Returns a batch of
-        ResearchChunk objects that have been persisted to the streaming database
-        by the running workflow. The client should poll this endpoint repeatedly
-        (recommended interval: 2000ms) until the 'completed' field is true.
+        Platform-managed pull-based polling endpoint. The Oryonix platform serves
+        this route directly from its internal streaming database — no operationId
+        or main.py implementation is declared or permitted for this path.
+        The platform identifies this as a built-in route by the absence of an
+        operationId; if an operationId were present the platform would attempt
+        to dispatch to a Python function with that name, which does not exist.
 
-        Chunks are returned in ascending sequence order. Use 'after_sequence' to
-        retrieve only new chunks since the last poll. The 'sequence' field on each
-        chunk is the authoritative ordering key; do not rely on chunk_id or arrival
-        order.
+        Returns a batch of ResearchChunk objects persisted to the streaming
+        database by the running workflow. Poll repeatedly (recommended: 2000ms)
+        until 'completed' is true.
 
-        This endpoint is implemented entirely by the Oryonix platform's DB-backed
-        streaming layer. No implementation in main.py is required or permitted.
-      operationId: get_stream_chunks
+        Chunks are returned in ascending sequence order. Pass 'after_sequence'
+        set to the highest sequence number seen to receive only new chunks.
+        The 'sequence' field is the authoritative ordering key.
       parameters:
         - name: flow_id
           in: query
