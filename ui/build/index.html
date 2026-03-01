@@ -1603,7 +1603,8 @@ function processChunk(chunk) {
       if (artifact && artifact.final_summary) {
         S.execSummary = artifact.final_summary;
       }
-      // Actual view transition is handled in the poll() terminal-condition block.
+      // showCompletedView() is called immediately after processChunk returns
+      // in the consumeStream event loop — see the check below.
       break;
 
     // ---- Refinement ----
@@ -1745,8 +1746,22 @@ async function consumeStream(resp) {
       const { done, value } = await reader.read();
 
       if (done) {
-        // Server closed the connection — treat as completion.
-        showCompletedView();
+        // Stream closed. If pipeline_complete or STREAM_COMPLETED had already been
+        // processed, consumeStream would have returned before reaching this point.
+        // Therefore arriving here always means the stream closed prematurely — the
+        // pipeline did NOT complete cleanly. Show a diagnostic error and let the
+        // user retry rather than rendering a fake empty "Pipeline Complete" screen.
+        const hint = S.lastSeq
+          ? `Stream closed after seq ${S.lastSeq} (${S.chunkCount} chunk(s) received).`
+          : 'Stream closed before any chunks were received.';
+        showErr('inputError',
+          `Pipeline stream ended unexpectedly. ${hint} ` +
+          `Check your Gemini API key, verify your quota, and try again.`
+        );
+        setStatus('dot-ruby', 'Stream error');
+        $('btnRun').disabled = false;
+        $('btnRunLabel').textContent = 'Run Pipeline';
+        showView('input');
         return;
       }
 
@@ -1807,7 +1822,11 @@ async function consumeStream(resp) {
     // AbortError is expected if resetAll() cancels the reader — not a real error.
     if (e.name !== 'AbortError') {
       console.error('ResearchBot: stream read error:', e);
-      showErr('inputError', `Stream error: ${e.message}`);
+      showErr('inputError', `Stream read error: ${e.message}`);
+      setStatus('dot-ruby', 'Error');
+      $('btnRun').disabled = false;
+      $('btnRunLabel').textContent = 'Run Pipeline';
+      showView('input');
     }
   } finally {
     S.streamReader = null;

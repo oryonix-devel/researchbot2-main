@@ -720,6 +720,16 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
         )
         yield _chunk(
             stage="refined_executive_summary_synthesis",
+            status="started",
+            artifact={
+                "message": (
+                    f"Stage 5 (refined): Refined executive summary synthesis "
+                    f"starting (attempt {attempt})."
+                ),
+            },
+        )
+        yield _chunk(
+            stage="refined_executive_summary_synthesis",
             status="processing",
             artifact={
                 "message": (
@@ -737,6 +747,16 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
             gemini_api_key=gemini_api_key,
         )
 
+        yield _chunk(
+            stage="refined_executive_summary_synthesis",
+            status="processing",
+            artifact={
+                "message": (
+                    f"Refined executive summary response received; validating "
+                    f"(attempt {attempt})."
+                ),
+            },
+        )
         yield _chunk(
             stage="refined_executive_summary_synthesis",
             status="complete",
