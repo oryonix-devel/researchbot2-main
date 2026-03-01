@@ -658,6 +658,16 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
         critique: str = approval_record["critique"]
 
         if approved:
+            # Emit approval_received first so the UI can close the approval modal.
+            yield _chunk(
+                stage="approval_received",
+                status="approved",
+                artifact={
+                    "message": (
+                        f"Approval received for attempt {attempt}: accepted."
+                    ),
+                },
+            )
             # Human accepted — pipeline is complete.
             yield _chunk(
                 stage="pipeline_complete",
@@ -678,6 +688,20 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
         # ------------------------------------------------------------------
         # Rejection path — begin a new refinement iteration.
         # ------------------------------------------------------------------
+
+        # Emit approval_received/rejected so UI closes the approval modal
+        # and switches back to the pipeline view before refinement begins.
+        yield _chunk(
+            stage="approval_received",
+            status="rejected",
+            artifact={
+                "message": (
+                    f"Approval received for attempt {attempt}: rejected. "
+                    "Beginning refinement."
+                ),
+                "critique": critique,
+            },
+        )
 
         attempt += 1  # Increment before emitting so chunks reflect new attempt.
 

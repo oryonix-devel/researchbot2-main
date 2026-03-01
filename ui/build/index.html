@@ -1587,51 +1587,72 @@ function processChunk(chunk) {
 
   switch (stage) {
 
-    case 'pipeline':
-      if (status === 'started') {
-        setStatus('dot-amber', 'Pipeline running');
-        $('pipelineHeading').textContent = 'Analysing abstract…';
-        $('sidebarTitle').textContent = 'Pipeline Running';
-      }
-      if (status === 'completed') {
-        S.totalAttempts = (artifact && artifact.total_attempts) || S.attempt;
-        if (artifact && artifact.executive_summary) {
-          S.execSummary = artifact.executive_summary;
-        }
-        // handled in poll loop
-      }
+    // ---- Pipeline lifecycle ----
+    // Server emits: stage='pipeline_started', status='running'
+    case 'pipeline_started':
+      setStatus('dot-amber', 'Pipeline running');
+      $('pipelineHeading').textContent = 'Analysing abstract…';
+      $('sidebarTitle').textContent = 'Pipeline Running';
       break;
 
-    case 'refinement':
-      if (status === 'started') {
-        setStatus('dot-amber', `Refining — attempt ${attempt}`);
-        $('sidebarTitle').textContent = `Refinement #${attempt}`;
-        // Reset exec summary card only
-        setCardState('executive_summary_synthesis', 'idle', null);
-        setSidebarStage('executive_summary_synthesis', 'idle');
+    // Server emits: stage='pipeline_complete', status='approved'
+    // artifact: { final_summary, total_attempts, message }
+    case 'pipeline_complete':
+      S.totalAttempts = (artifact && artifact.total_attempts) || S.attempt;
+      if (artifact && artifact.final_summary) {
+        S.execSummary = artifact.final_summary;
       }
+      // Actual view transition is handled in the poll() terminal-condition block.
       break;
 
+    // ---- Refinement ----
+    // Server emits: stage='refinement_started', status='running'
+    case 'refinement_started':
+      setStatus('dot-amber', `Refining — attempt ${attempt}`);
+      $('sidebarTitle').textContent = `Refinement #${attempt}`;
+      // Reset exec summary card so it shows as active again during refinement.
+      setCardState('executive_summary_synthesis', 'idle', null);
+      setSidebarStage('executive_summary_synthesis', 'idle');
+      break;
+
+    // ---- Core pipeline stages ----
+    // status values from server: 'started' | 'processing' | 'complete'
+    // artifact on complete chunks uses key 'result' (not 'text')
     case 'structural_decomposition':
     case 'evidence_extraction':
     case 'risk_analysis':
     case 'comparative_context_generation':
-    case 'executive_summary_synthesis': {
-      const cardState = status === 'completed' ? 'done'
+    case 'executive_summary_synthesis':
+    // Refinement re-runs only the exec summary under a different stage name.
+    // We map it back to the same card so the UI shows progress correctly.
+    case 'refined_executive_summary_synthesis': {
+      // Normalise the card key: refinement reuses the exec summary card.
+      const cardKey = stage === 'refined_executive_summary_synthesis'
+                    ? 'executive_summary_synthesis'
+                    : stage;
+
+      // Server uses 'complete' (not 'completed').
+      const cardState = status === 'complete'    ? 'done'
                       : status === 'calling_api' ? 'calling'
                       : (status === 'started' || status === 'processing') ? 'active'
                       : 'idle';
-      const text = artifact && artifact.text ? artifact.text : null;
-      setCardState(stage, cardState, text);
-      setSidebarStage(stage, status === 'completed' ? 'done' : cardState === 'idle' ? 'idle' : 'active');
+
+      // Server puts the Gemini result in artifact.result (not artifact.text).
+      const text = (artifact && (artifact.result || artifact.text)) || null;
+
+      setCardState(cardKey, cardState, text);
+      setSidebarStage(cardKey, status === 'complete' ? 'done'
+                              : cardState === 'idle' ? 'idle' : 'active');
 
       if (status === 'started') {
-        const def = STAGE_DEFS.find(d => d.key === stage);
-        $('pipelineHeading').textContent = `Running: ${def ? def.label : stage}`;
-        setStatus('dot-amber', def ? def.short : stage);
-        scrollToCard(stage);
+        const def = STAGE_DEFS.find(d => d.key === cardKey);
+        $('pipelineHeading').textContent = `Running: ${def ? def.label : cardKey}`;
+        setStatus('dot-amber', def ? def.short : cardKey);
+        scrollToCard(cardKey);
       }
-      if (status === 'completed' && stage === 'executive_summary_synthesis' && text) {
+
+      // Capture executive summary as soon as synthesis completes.
+      if (status === 'complete' && cardKey === 'executive_summary_synthesis' && text) {
         S.execSummary = text;
       }
       break;
@@ -1639,8 +1660,9 @@ function processChunk(chunk) {
 
     case 'awaiting_approval':
       if (status === 'pending') {
-        if (artifact && artifact.executive_summary) {
-          S.execSummary = artifact.executive_summary;
+        // Server uses 'current_summary' key (per spec §13 / server.yaml artifact schema).
+        if (artifact && artifact.current_summary) {
+          S.execSummary = artifact.current_summary;
         }
         setStatus('dot-ruby', 'Awaiting approval');
         $('sidebarLiveDot').className = 'pulse-dot dot-ruby';
@@ -1657,7 +1679,7 @@ function processChunk(chunk) {
         $('sidebarLiveLabel').textContent = 'Streaming chunks…';
         showView('pipeline');
       } else {
-        // Rejected — switch back to pipeline view for refinement
+        // Rejected — switch back to pipeline view for refinement.
         showView('pipeline');
         setStatus('dot-amber', 'Refining…');
         $('sidebarLiveDot').className = 'pulse-dot dot-amber';
@@ -1712,9 +1734,10 @@ async function poll() {
       processChunk(c);
     });
 
-    // Terminal condition
+    // Terminal condition: platform sets data.completed=true OR we see the
+    // pipeline_complete chunk (stage name from server: 'pipeline_complete').
     const last = chunks[chunks.length - 1];
-    const done = data.completed || (last && last.stage === 'pipeline' && last.status === 'completed');
+    const done = data.completed || (last && last.stage === 'pipeline_complete');
     if (done) {
       stopPoll();
       showCompletedView();
@@ -1755,11 +1778,25 @@ async function startPipeline() {
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ request_id: requestId, abstract, gemini_api_key: apiKey }),
     });
-    const data = await resp.json();
-    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
 
+    // The Oryonix platform streams SSE directly from POST /api/run (content-type:
+    // text/event-stream). We must NOT call resp.json() on a streaming response —
+    // that would fail immediately. For error responses (non-2xx) the platform does
+    // return application/json, so we only parse the body on failure.
+    if (!resp.ok) {
+      let errMsg = `HTTP ${resp.status}`;
+      try {
+        const errData = await resp.json();
+        errMsg = errData.error || errData.message || errData.detail || errMsg;
+      } catch (_) { /* body not JSON — use status code message */ }
+      throw new Error(errMsg);
+    }
+
+    // Flow ID is deterministically derived from request_id on both client and server.
+    // The server constructs it as `research:{request_id}` inside run_research_pipeline.
+    // We mirror that here so no JSON body parsing is needed.
+    const flowId = `research:${requestId}`;
     // Init state
-    const flowId = data.flow_id || `research:${requestId}`;
     Object.assign(S, {
       flowId, lastSeq: 0, attempt: 1,
       artifacts: {}, stageStatus: {},
