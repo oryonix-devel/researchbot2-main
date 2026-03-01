@@ -78,6 +78,75 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/stream:
+    get:
+      summary: Poll for streaming chunks from a running pipeline
+      description: >
+        Platform-managed pull-based polling endpoint. Returns a batch of
+        ResearchChunk objects that have been persisted to the streaming database
+        by the running workflow. The client should poll this endpoint repeatedly
+        (recommended interval: 2000ms) until the 'completed' field is true.
+
+        Chunks are returned in ascending sequence order. Use 'after_sequence' to
+        retrieve only new chunks since the last poll. The 'sequence' field on each
+        chunk is the authoritative ordering key; do not rely on chunk_id or arrival
+        order.
+
+        This endpoint is implemented entirely by the Oryonix platform's DB-backed
+        streaming layer. No implementation in main.py is required or permitted.
+      operationId: get_stream_chunks
+      parameters:
+        - name: flow_id
+          in: query
+          required: true
+          description: >
+            The flow ID to retrieve chunks for. Format: "research:{request_id}".
+            Must match the flow_id returned by POST /api/run exactly.
+          schema:
+            type: string
+            example: "research:abc123"
+        - name: after_sequence
+          in: query
+          required: false
+          description: >
+            Return only chunks with sequence number strictly greater than this value.
+            Defaults to 0 (return all chunks from the beginning of the stream).
+            Clients should pass the highest sequence number seen so far to receive
+            only new chunks on each poll.
+          schema:
+            type: integer
+            default: 0
+            minimum: 0
+            example: 7
+      responses:
+        "200":
+          description: >
+            Batch of chunks available since after_sequence, plus stream metadata.
+            The 'chunks' array may be empty if no new chunks have been emitted
+            since the last poll. Continue polling until 'completed' is true.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StreamResponse"
+        "404":
+          description: No workflow found for the given flow_id.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "400":
+          description: Validation error — flow_id missing.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal platform error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/approval:
     post:
       summary: Submit human approval or rejection decision
@@ -140,6 +209,39 @@ paths:
 
 components:
   schemas:
+
+    StreamResponse:
+      type: object
+      description: >
+        Response envelope returned by GET /api/stream. Contains a batch of
+        ResearchChunk objects emitted since after_sequence, plus stream metadata.
+      required:
+        - chunks
+        - completed
+        - total_chunks_available
+      properties:
+        chunks:
+          type: array
+          description: >
+            Ordered list of ResearchChunk objects with sequence > after_sequence.
+            May be empty if no new chunks have been emitted. Always sorted by
+            sequence ascending.
+          items:
+            $ref: "#/components/schemas/ResearchChunk"
+        completed:
+          type: boolean
+          description: >
+            True when the workflow has finished and the platform has appended the
+            STREAM_COMPLETED sentinel. Once true, no further chunks will be emitted
+            and the client should stop polling.
+          example: false
+        total_chunks_available:
+          type: integer
+          description: >
+            Total number of chunks persisted for this flow_id so far, including
+            chunks before after_sequence. Useful for progress indication.
+          example: 12
+          minimum: 0
 
     RunPipelineRequest:
       type: object
@@ -262,6 +364,7 @@ components:
             - complete
             - pending
             - approved
+            - rejected
           example: "processing"
         attempt:
           type: integer
