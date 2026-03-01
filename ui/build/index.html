@@ -3,156 +3,1876 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>ResearchBot2</title>
+  <title>ResearchBot2 — Research Evaluation Pipeline</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;0,700;1,400;1,600&family=JetBrains+Mono:wght@400;500;600&family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+
   <style>
+    /* =========================================================
+       DESIGN SYSTEM
+       Aesthetic: Academic Research Instrument — Cormorant headings
+       for gravitas, JetBrains Mono for data fidelity, amber
+       accents on near-black ground. Intentional tension between
+       scholarly elegance and technical precision.
+    ========================================================= */
+    :root {
+      --ink:        #0c0b09;
+      --ink-2:      #131210;
+      --ink-3:      #1c1a17;
+      --ink-4:      #252320;
+      --ink-5:      #2e2c28;
+      --rule:       #302e2a;
+      --rule-dim:   #1e1d1a;
+      --dust:       #4a4640;
+      --muted:      #7a7268;
+      --body:       #c8c0b4;
+      --paper:      #f0ead8;
+      --amber:      #f0a030;
+      --amber-dim:  #2a1e08;
+      --amber-glow: rgba(240,160,48,0.12);
+      --emerald:    #4ade80;
+      --emerald-dim:#0a2016;
+      --ruby:       #f87171;
+      --ruby-dim:   #2a0808;
+      --sapphire:   #60a5fa;
+      --shadow-sm:  0 2px 8px rgba(0,0,0,0.4);
+      --shadow:     0 8px 32px rgba(0,0,0,0.5);
+      --shadow-lg:  0 24px 64px rgba(0,0,0,0.7);
+      --r:          6px;
+      --r-sm:       3px;
+      --r-lg:       10px;
+      --mono:       'JetBrains Mono', 'Fira Code', monospace;
+      --serif:      'Cormorant Garamond', Georgia, serif;
+      --sans:       'Instrument Sans', -apple-system, sans-serif;
+      --ease:       cubic-bezier(0.4,0,0.2,1);
+    }
+
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+    html { scroll-behavior: smooth; }
+
     body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background: #0d0f14;
-      color: #e2e8f0;
+      background: var(--ink);
+      color: var(--body);
+      font-family: var(--sans);
+      font-size: 14px;
+      line-height: 1.6;
       min-height: 100vh;
-      display: flex;
-      flex-direction: column;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ---- Scrollbar ---- */
+    ::-webkit-scrollbar { width: 5px; height: 5px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--ink-5); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--dust); }
+
+    /* ======================================================
+       GLOBAL COMPONENTS
+    ====================================================== */
+
+    /* Noise texture overlay */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");
+      pointer-events: none;
+      z-index: 9999;
+      opacity: 0.35;
+    }
+
+    /* Typography */
+    .t-serif {
+      font-family: var(--serif);
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
+
+    .t-mono {
+      font-family: var(--mono);
+      font-size: 11px;
+    }
+
+    h1, h2, h3 { font-family: var(--serif); line-height: 1.2; }
+
+    /* Buttons */
+    .btn {
+      display: inline-flex;
       align-items: center;
       justify-content: center;
-      padding: 2rem;
+      gap: 8px;
+      padding: 11px 22px;
+      border-radius: var(--r);
+      font-family: var(--sans);
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      border: none;
+      transition: all 0.15s var(--ease);
+      letter-spacing: 0.01em;
+      white-space: nowrap;
     }
 
-    .card {
-      background: #161b27;
-      border: 1px solid #2d3748;
-      border-radius: 12px;
-      padding: 2.5rem 3rem;
-      max-width: 560px;
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; pointer-events: none; }
+
+    .btn-amber {
+      background: var(--amber);
+      color: var(--ink);
+    }
+    .btn-amber:hover {
+      background: #ffb84d;
+      transform: translateY(-1px);
+      box-shadow: 0 6px 20px rgba(240,160,48,0.4);
+    }
+    .btn-amber:active { transform: translateY(0); }
+
+    .btn-ghost {
+      background: transparent;
+      color: var(--muted);
+      border: 1px solid var(--rule);
+    }
+    .btn-ghost:hover { color: var(--paper); border-color: var(--dust); background: var(--ink-3); }
+
+    .btn-emerald {
+      background: var(--emerald);
+      color: var(--ink);
+    }
+    .btn-emerald:hover {
+      background: #6ee89a;
+      transform: translateY(-1px);
+      box-shadow: 0 6px 20px rgba(74,222,128,0.35);
+    }
+
+    .btn-ruby {
+      background: var(--ruby-dim);
+      color: var(--ruby);
+      border: 1px solid rgba(248,113,113,0.3);
+    }
+    .btn-ruby:hover {
+      background: rgba(248,113,113,0.15);
+      transform: translateY(-1px);
+      box-shadow: 0 6px 20px rgba(248,113,113,0.2);
+    }
+
+    .btn-sm {
+      padding: 7px 14px;
+      font-size: 12px;
+    }
+
+    /* Form elements */
+    .field { margin-bottom: 22px; }
+
+    .field-label {
+      display: block;
+      font-family: var(--mono);
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 7px;
+    }
+
+    .field-label .req { color: var(--amber); margin-left: 3px; }
+
+    input[type="text"],
+    input[type="password"],
+    textarea {
       width: 100%;
-      text-align: center;
+      background: var(--ink-3);
+      border: 1px solid var(--rule);
+      border-radius: var(--r);
+      color: var(--paper);
+      font-family: var(--sans);
+      font-size: 14px;
+      padding: 11px 14px;
+      outline: none;
+      transition: border-color 0.15s var(--ease), box-shadow 0.15s var(--ease);
+      -webkit-appearance: none;
     }
 
-    .badge {
-      display: inline-block;
-      background: #1a2a4a;
-      color: #63b3ed;
-      border: 1px solid #2b4c7e;
-      border-radius: 999px;
-      font-size: 0.72rem;
+    input[type="text"]:focus,
+    input[type="password"]:focus,
+    textarea:focus {
+      border-color: var(--amber);
+      box-shadow: 0 0 0 3px var(--amber-glow);
+    }
+
+    input[type="text"]::placeholder,
+    input[type="password"]::placeholder,
+    textarea::placeholder { color: var(--dust); }
+
+    textarea { resize: vertical; min-height: 160px; line-height: 1.7; }
+
+    .field-hint {
+      font-size: 11px;
+      color: var(--dust);
+      margin-top: 6px;
+      font-family: var(--mono);
+      letter-spacing: 0.02em;
+    }
+
+    /* Input row addons */
+    .input-addon { position: relative; }
+    .input-addon input { padding-right: 80px; }
+    .input-addon-btn {
+      position: absolute;
+      right: 8px;
+      top: 50%;
+      transform: translateY(-50%);
+      background: var(--ink-5);
+      border: 1px solid var(--rule);
+      color: var(--muted);
+      border-radius: var(--r-sm);
+      padding: 4px 10px;
+      font-size: 11px;
+      font-family: var(--mono);
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .input-addon-btn:hover { color: var(--paper); background: var(--ink-4); }
+
+    /* Chips / Badges */
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-family: var(--mono);
+      font-size: 10px;
       font-weight: 600;
-      letter-spacing: 0.08em;
+      letter-spacing: 0.06em;
       text-transform: uppercase;
-      padding: 0.25rem 0.8rem;
-      margin-bottom: 1.25rem;
+      padding: 3px 9px;
+      border-radius: 20px;
     }
 
-    h1 {
-      font-size: 1.6rem;
-      font-weight: 700;
-      color: #f7fafc;
-      margin-bottom: 0.5rem;
-      letter-spacing: -0.02em;
+    .chip-amber { background: var(--amber-dim); color: var(--amber); border: 1px solid rgba(240,160,48,0.3); }
+    .chip-emerald { background: var(--emerald-dim); color: var(--emerald); border: 1px solid rgba(74,222,128,0.3); }
+    .chip-dust { background: var(--ink-4); color: var(--muted); border: 1px solid var(--rule-dim); }
+    .chip-ruby { background: var(--ruby-dim); color: var(--ruby); border: 1px solid rgba(248,113,113,0.3); }
+
+    /* Spinner */
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner {
+      width: 14px;
+      height: 14px;
+      border: 2px solid var(--ink-5);
+      border-top-color: var(--amber);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      flex-shrink: 0;
+    }
+    .spinner-sm {
+      width: 10px;
+      height: 10px;
+      border-width: 1.5px;
     }
 
-    .subtitle {
-      font-size: 0.9rem;
-      color: #718096;
-      margin-bottom: 2rem;
-      line-height: 1.6;
+    /* Pulse dot */
+    @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:0.3;} }
+    .pulse-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .dot-amber { background: var(--amber); animation: pulse 1.5s ease infinite; }
+    .dot-emerald { background: var(--emerald); }
+    .dot-dust { background: var(--dust); }
+    .dot-ruby { background: var(--ruby); animation: pulse 1.5s ease infinite; }
+
+    /* Divider */
+    .divider {
+      border: none;
+      border-top: 1px solid var(--rule-dim);
+      margin: 24px 0;
     }
 
-    .endpoints {
-      text-align: left;
-      background: #0d0f14;
-      border: 1px solid #2d3748;
-      border-radius: 8px;
-      padding: 1.25rem;
-      margin-bottom: 1.5rem;
-    }
-
-    .endpoints h2 {
-      font-size: 0.75rem;
+    /* Section title */
+    .section-eyebrow {
+      font-family: var(--mono);
+      font-size: 10px;
       font-weight: 600;
-      letter-spacing: 0.1em;
+      letter-spacing: 0.14em;
       text-transform: uppercase;
-      color: #4a5568;
-      margin-bottom: 0.75rem;
+      color: var(--dust);
+      margin-bottom: 14px;
     }
 
-    .endpoint {
+    /* Error banner */
+    .error-banner {
+      display: none;
+      background: var(--ruby-dim);
+      border: 1px solid rgba(248,113,113,0.3);
+      border-radius: var(--r);
+      padding: 11px 14px;
+      font-size: 13px;
+      color: var(--ruby);
+      margin-bottom: 18px;
+    }
+    .error-banner.visible { display: block; }
+
+    /* Text output prose */
+    .prose {
+      font-family: var(--sans);
+      font-size: 13px;
+      line-height: 1.8;
+      color: var(--body);
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    /* Accordion */
+    .accord {
+      border: 1px solid var(--rule);
+      border-radius: var(--r);
+      overflow: hidden;
+      margin-bottom: 10px;
+      transition: border-color 0.15s;
+    }
+    .accord:hover { border-color: var(--ink-5); }
+
+    .accord-head {
       display: flex;
       align-items: center;
-      gap: 0.75rem;
-      padding: 0.5rem 0;
-      border-bottom: 1px solid #1a202c;
-      font-size: 0.83rem;
+      justify-content: space-between;
+      padding: 13px 16px;
+      cursor: pointer;
+      background: var(--ink-3);
+      user-select: none;
+      transition: background 0.15s;
+    }
+    .accord-head:hover { background: var(--ink-4); }
+
+    .accord-head-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
     }
 
-    .endpoint:last-child { border-bottom: none; }
+    .accord-title {
+      font-family: var(--sans);
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--body);
+    }
 
-    .method {
-      font-size: 0.68rem;
+    .accord-arrow {
+      font-size: 10px;
+      color: var(--dust);
+      transition: transform 0.2s var(--ease);
+    }
+    .accord.open .accord-arrow { transform: rotate(90deg); }
+
+    .accord-body {
+      display: none;
+      border-top: 1px solid var(--rule-dim);
+      background: var(--ink-2);
+    }
+    .accord.open .accord-body { display: block; }
+
+    .accord-content {
+      padding: 16px 18px;
+      max-height: 380px;
+      overflow-y: auto;
+    }
+
+    /* ======================================================
+       LAYOUT SHELL
+    ====================================================== */
+    #shell {
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
+    }
+
+    /* Top bar */
+    #topbar {
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 0 28px;
+      height: 54px;
+      background: rgba(12,11,9,0.85);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--rule-dim);
+    }
+
+    .topbar-logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .logo-glyph {
+      width: 30px;
+      height: 30px;
+      border: 1.5px solid var(--amber);
+      border-radius: var(--r-sm);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: var(--serif);
+      font-size: 15px;
       font-weight: 700;
-      padding: 0.15rem 0.45rem;
-      border-radius: 4px;
-      background: #1a3a2a;
-      color: #68d391;
-      letter-spacing: 0.05em;
+      color: var(--amber);
+      letter-spacing: -0.05em;
       flex-shrink: 0;
     }
 
-    .path { color: #90cdf4; font-family: "SF Mono", "Fira Code", monospace; }
-    .op   { color: #718096; font-size: 0.75rem; margin-left: auto; }
+    .topbar-name {
+      font-family: var(--serif);
+      font-size: 17px;
+      font-weight: 600;
+      color: var(--paper);
+      letter-spacing: -0.01em;
+    }
 
-    .status {
-      font-size: 0.78rem;
-      color: #48bb78;
+    .topbar-right {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    #topbarFlowId {
+      font-family: var(--mono);
+      font-size: 10px;
+      color: var(--dust);
+      display: none;
+      max-width: 240px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    #topbarStatus {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-family: var(--mono);
+      font-size: 10px;
+      color: var(--muted);
+    }
+
+    /* Panels */
+    .view {
+      display: none;
+      flex: 1;
+    }
+    .view.active {
+      display: flex;
+      flex-direction: column;
+      animation: viewIn 0.25s var(--ease);
+    }
+
+    @keyframes viewIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    /* ======================================================
+       VIEW: INPUT
+    ====================================================== */
+    #view-input {
+      align-items: center;
+      justify-content: center;
+      padding: 48px 24px;
+    }
+
+    .input-wrap {
+      width: 100%;
+      max-width: 640px;
+    }
+
+    .input-hero {
+      margin-bottom: 40px;
+    }
+
+    .input-hero-eyebrow {
+      font-family: var(--mono);
+      font-size: 10px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--amber);
+      margin-bottom: 10px;
+    }
+
+    .input-hero h1 {
+      font-size: 44px;
+      font-weight: 600;
+      color: var(--paper);
+      line-height: 1.1;
+      margin-bottom: 14px;
+      letter-spacing: -0.02em;
+    }
+
+    .input-hero h1 em {
+      font-style: italic;
+      color: var(--amber);
+    }
+
+    .input-hero p {
+      font-size: 15px;
+      color: var(--muted);
+      line-height: 1.7;
+      max-width: 480px;
+    }
+
+    .input-card {
+      background: var(--ink-2);
+      border: 1px solid var(--rule);
+      border-radius: var(--r-lg);
+      padding: 32px;
+    }
+
+    .input-submit-row {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      margin-top: 6px;
+    }
+
+    .input-submit-row .btn-amber {
+      flex: 1;
+      padding: 13px;
+      font-size: 14px;
+    }
+
+    .pipeline-stages-preview {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 22px;
+      padding-top: 22px;
+      border-top: 1px solid var(--rule-dim);
+    }
+
+    .stage-pill {
+      font-family: var(--mono);
+      font-size: 9px;
+      color: var(--dust);
+      background: var(--ink-3);
+      border: 1px solid var(--rule-dim);
+      border-radius: 20px;
+      padding: 3px 10px;
+      letter-spacing: 0.05em;
+    }
+
+    /* ======================================================
+       VIEW: PIPELINE (running / refinement)
+    ====================================================== */
+    #view-pipeline {
+      flex-direction: row;
+    }
+
+    /* Sidebar */
+    .pipeline-sidebar {
+      width: 280px;
+      flex-shrink: 0;
+      background: var(--ink-2);
+      border-right: 1px solid var(--rule-dim);
+      display: flex;
+      flex-direction: column;
+      position: sticky;
+      top: 54px;
+      height: calc(100vh - 54px);
+      overflow-y: auto;
+    }
+
+    .sidebar-header {
+      padding: 22px 20px 16px;
+      border-bottom: 1px solid var(--rule-dim);
+    }
+
+    .sidebar-header-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+
+    .sidebar-title {
+      font-family: var(--serif);
+      font-size: 18px;
+      font-weight: 600;
+      color: var(--paper);
+    }
+
+    .sidebar-meta {
+      font-family: var(--mono);
+      font-size: 10px;
+      color: var(--dust);
+      margin-top: 4px;
+      word-break: break-all;
+    }
+
+    /* Stage list */
+    .stage-list {
+      padding: 16px 12px;
+      flex: 1;
+    }
+
+    .stage-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 10px;
+      border-radius: var(--r);
+      cursor: pointer;
+      transition: background 0.12s;
+      position: relative;
+      margin-bottom: 4px;
+    }
+
+    .stage-item:hover { background: var(--ink-3); }
+    .stage-item.active-stage { background: var(--ink-4); }
+
+    /* Connecting line between stages */
+    .stage-item:not(:last-child)::after {
+      content: '';
+      position: absolute;
+      left: 21px;
+      top: 34px;
+      width: 1px;
+      height: calc(100% - 10px);
+      background: var(--rule-dim);
+    }
+
+    .stage-bullet {
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
       display: flex;
       align-items: center;
       justify-content: center;
-      gap: 0.4rem;
+      flex-shrink: 0;
+      margin-top: 1px;
+      font-size: 10px;
+      font-weight: 600;
+      font-family: var(--mono);
+      transition: all 0.2s var(--ease);
+      position: relative;
+      z-index: 1;
     }
 
-    .dot {
-      width: 6px;
-      height: 6px;
+    .bullet-idle {
+      background: var(--ink-4);
+      border: 1px solid var(--rule);
+      color: var(--dust);
+    }
+
+    .bullet-active {
+      background: var(--amber-dim);
+      border: 1px solid var(--amber);
+    }
+
+    .bullet-done {
+      background: var(--emerald-dim);
+      border: 1px solid rgba(74,222,128,0.5);
+      color: var(--emerald);
+    }
+
+    .stage-item-info { flex: 1; min-width: 0; }
+
+    .stage-item-name {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--body);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .stage-item.active-stage .stage-item-name { color: var(--amber); }
+    .stage-item.done-stage .stage-item-name { color: var(--paper); }
+
+    .stage-item-status {
+      font-family: var(--mono);
+      font-size: 10px;
+      color: var(--dust);
+      margin-top: 2px;
+    }
+
+    /* Sidebar footer */
+    .sidebar-footer {
+      padding: 14px 16px;
+      border-top: 1px solid var(--rule-dim);
+    }
+
+    .live-status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-family: var(--mono);
+      font-size: 10px;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+
+    .seq-counter {
+      font-family: var(--mono);
+      font-size: 10px;
+      color: var(--dust);
+    }
+
+    /* Main content area */
+    .pipeline-content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 28px 32px;
+    }
+
+    .pipeline-content-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 24px;
+      flex-wrap: wrap;
+    }
+
+    .pipeline-content-header h2 {
+      font-size: 26px;
+      color: var(--paper);
+    }
+
+    /* Stage output cards in main area */
+    .output-section {
+      margin-bottom: 20px;
+    }
+
+    .output-card {
+      background: var(--ink-2);
+      border: 1px solid var(--rule);
+      border-radius: var(--r-lg);
+      overflow: hidden;
+      transition: border-color 0.2s;
+    }
+
+    .output-card.card-active { border-color: var(--amber); }
+    .output-card.card-done { border-color: var(--rule); }
+
+    .output-card-head {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 14px 18px;
+      cursor: pointer;
+      transition: background 0.12s;
+    }
+
+    .output-card-head:hover { background: var(--ink-3); }
+
+    .card-head-icon {
+      width: 28px;
+      height: 28px;
+      border-radius: var(--r-sm);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 600;
+      flex-shrink: 0;
+    }
+
+    .card-icon-idle { background: var(--ink-4); color: var(--dust); }
+    .card-icon-active { background: var(--amber-dim); color: var(--amber); }
+    .card-icon-done { background: var(--emerald-dim); color: var(--emerald); }
+
+    .card-head-info { flex: 1; }
+    .card-head-name {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--paper);
+    }
+    .card-head-subtitle {
+      font-family: var(--mono);
+      font-size: 10px;
+      color: var(--dust);
+      margin-top: 2px;
+    }
+
+    .card-head-right {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .card-chevron {
+      font-size: 10px;
+      color: var(--dust);
+      transition: transform 0.2s var(--ease);
+    }
+    .card-chevron.open { transform: rotate(90deg); }
+
+    .output-card-body {
+      display: none;
+      border-top: 1px solid var(--rule-dim);
+    }
+
+    .output-card.expanded .output-card-body { display: block; }
+
+    .output-card-content {
+      padding: 18px 20px;
+      max-height: 420px;
+      overflow-y: auto;
+    }
+
+    /* Calling API state animation */
+    @keyframes shimmer {
+      0% { background-position: -200% 0; }
+      100% { background-position: 200% 0; }
+    }
+
+    .api-loading-bar {
+      height: 2px;
+      background: linear-gradient(90deg, transparent, var(--amber), transparent);
+      background-size: 200% 100%;
+      animation: shimmer 1.5s infinite;
+    }
+
+    /* Chunk log in sidebar */
+    .chunk-log {
+      display: none;
+    }
+
+    /* ======================================================
+       VIEW: APPROVAL GATE
+    ====================================================== */
+    #view-approval {
+      flex-direction: row;
+    }
+
+    .approval-sidebar {
+      width: 300px;
+      flex-shrink: 0;
+      background: var(--ink-2);
+      border-right: 1px solid var(--rule-dim);
+      padding: 28px 24px;
+      position: sticky;
+      top: 54px;
+      height: calc(100vh - 54px);
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .approval-sidebar-header {
+      margin-bottom: 24px;
+    }
+
+    .approval-gate-title {
+      font-family: var(--serif);
+      font-size: 24px;
+      font-weight: 600;
+      color: var(--paper);
+      line-height: 1.2;
+      margin-bottom: 8px;
+    }
+
+    .approval-gate-sub {
+      font-size: 13px;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+
+    .attempt-display {
+      background: var(--ink-3);
+      border: 1px solid var(--rule);
+      border-radius: var(--r);
+      padding: 12px 14px;
+      margin: 16px 0;
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .attempt-display strong {
+      color: var(--amber);
+      font-weight: 600;
+    }
+
+    .critique-section {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .critique-section textarea {
+      flex: 1;
+      min-height: 120px;
+      resize: none;
+      font-size: 13px;
+    }
+
+    .approval-actions {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-top: 14px;
+    }
+
+    .approval-actions .btn {
+      width: 100%;
+      padding: 13px;
+    }
+
+    /* Approval main area */
+    .approval-main {
+      flex: 1;
+      overflow-y: auto;
+      padding: 28px 32px;
+    }
+
+    .approval-main-header {
+      margin-bottom: 24px;
+    }
+
+    .approval-main-header h2 {
+      font-size: 26px;
+      color: var(--paper);
+      margin-bottom: 6px;
+    }
+
+    .exec-summary-display {
+      background: var(--ink-2);
+      border: 1px solid var(--amber);
+      border-radius: var(--r-lg);
+      padding: 28px 32px;
+      margin-bottom: 28px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .exec-summary-display::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 2px;
+      background: linear-gradient(90deg, var(--amber), transparent);
+    }
+
+    .exec-summary-label {
+      font-family: var(--mono);
+      font-size: 10px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--amber);
+      margin-bottom: 16px;
+    }
+
+    .exec-summary-text {
+      font-size: 14px;
+      line-height: 1.85;
+      color: var(--paper);
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 500px;
+      overflow-y: auto;
+    }
+
+    /* ======================================================
+       VIEW: COMPLETED
+    ====================================================== */
+    #view-completed {
+      align-items: center;
+      padding: 48px 24px;
+    }
+
+    .completed-wrap {
+      width: 100%;
+      max-width: 820px;
+    }
+
+    .completed-hero {
+      text-align: center;
+      margin-bottom: 48px;
+    }
+
+    .completed-icon-ring {
+      width: 72px;
+      height: 72px;
       border-radius: 50%;
-      background: #48bb78;
-      animation: pulse 2s infinite;
+      background: var(--emerald-dim);
+      border: 2px solid rgba(74,222,128,0.4);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 28px;
+      margin: 0 auto 20px;
     }
 
-    @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50%       { opacity: 0.35; }
+    .completed-hero h2 {
+      font-size: 38px;
+      font-weight: 600;
+      color: var(--paper);
+      margin-bottom: 8px;
+    }
+
+    .completed-hero p {
+      color: var(--muted);
+      font-size: 15px;
+    }
+
+    .completed-meta-row {
+      display: flex;
+      gap: 10px;
+      justify-content: center;
+      margin-top: 18px;
+      flex-wrap: wrap;
+    }
+
+    .final-exec {
+      background: var(--ink-2);
+      border: 1px solid var(--rule);
+      border-radius: var(--r-lg);
+      padding: 32px 36px;
+      margin-bottom: 32px;
+      position: relative;
+    }
+
+    .final-exec-label {
+      font-family: var(--mono);
+      font-size: 10px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--emerald);
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .final-exec-text {
+      font-family: var(--serif);
+      font-size: 16px;
+      line-height: 1.85;
+      color: var(--paper);
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .stage-results-wrap {
+      margin-bottom: 32px;
+    }
+
+    .completed-actions {
+      text-align: center;
+      padding-top: 12px;
+    }
+
+    /* ======================================================
+       RESPONSIVE
+    ====================================================== */
+    @media (max-width: 768px) {
+      #view-pipeline { flex-direction: column; }
+      .pipeline-sidebar {
+        width: 100%;
+        height: auto;
+        position: static;
+        border-right: none;
+        border-bottom: 1px solid var(--rule-dim);
+      }
+      .stage-list { display: none; }
+
+      #view-approval { flex-direction: column; }
+      .approval-sidebar {
+        width: 100%;
+        height: auto;
+        position: static;
+        border-right: none;
+        border-bottom: 1px solid var(--rule-dim);
+      }
+
+      .pipeline-content { padding: 20px 16px; }
+      .approval-main { padding: 20px 16px; }
     }
   </style>
 </head>
 <body>
-  <div class="card">
-    <div class="badge">Oryonix Platform</div>
-    <h1>ResearchBot2</h1>
-    <p class="subtitle">
-      Temporal-durable research evaluation pipeline.<br />
-      Powered by Gemini · Streamed via fc primitives.
-    </p>
+<div id="shell">
 
-    <div class="endpoints">
-      <h2>API Endpoints</h2>
-
-      <div class="endpoint">
-        <span class="method">POST</span>
-        <span class="path">/api/run</span>
-        <span class="op">run_research_pipeline</span>
-      </div>
-
-      <div class="endpoint">
-        <span class="method">POST</span>
-        <span class="path">/api/approval</span>
-        <span class="op">submit_approval</span>
+  <!-- ============================================================
+       TOP BAR
+  ============================================================ -->
+  <nav id="topbar">
+    <div class="topbar-logo">
+      <div class="logo-glyph">R²</div>
+      <span class="topbar-name">ResearchBot2</span>
+    </div>
+    <div class="topbar-right">
+      <span id="topbarFlowId"></span>
+      <div id="topbarStatus">
+        <div class="pulse-dot dot-dust" id="statusDot"></div>
+        <span id="statusLabel">Ready</span>
       </div>
     </div>
+  </nav>
 
-    <div class="status">
-      <div class="dot"></div>
-      Service operational
+  <!-- ============================================================
+       VIEW: INPUT
+  ============================================================ -->
+  <section class="view active" id="view-input">
+    <div class="input-wrap">
+      <div class="input-hero">
+        <div class="input-hero-eyebrow">Oryonix · Temporal-durable pipeline</div>
+        <h1>Research<br /><em>Evaluation</em></h1>
+        <p>
+          Paste an academic abstract to run a five-stage AI analysis pipeline — structural
+          decomposition, evidence extraction, risk assessment, comparative context, and
+          executive synthesis — with human-in-the-loop approval.
+        </p>
+      </div>
+
+      <div class="input-card">
+        <div class="error-banner" id="inputError"></div>
+
+        <!-- API Key -->
+        <div class="field">
+          <label class="field-label">Gemini API Key <span class="req">*</span></label>
+          <div class="input-addon">
+            <input type="password" id="apiKey" placeholder="AIzaSy..." autocomplete="off" spellcheck="false" />
+            <button class="input-addon-btn" id="toggleKey">show</button>
+          </div>
+          <div class="field-hint">// passed directly to Gemini REST — never persisted</div>
+        </div>
+
+        <!-- Request ID -->
+        <div class="field">
+          <label class="field-label">Request ID <span class="req">*</span></label>
+          <div class="input-addon">
+            <input type="text" id="requestId" placeholder="EVAL-001" autocomplete="off" spellcheck="false" />
+            <button class="input-addon-btn" id="genId">gen</button>
+          </div>
+          <div class="field-hint">// flow_id = research:{request_id} — must be unique per evaluation</div>
+        </div>
+
+        <!-- Abstract -->
+        <div class="field">
+          <label class="field-label">Abstract <span class="req">*</span></label>
+          <textarea id="abstract" placeholder="Paste the full text of the academic abstract here…"></textarea>
+          <div class="field-hint">// all five pipeline stages will analyse this input sequentially</div>
+        </div>
+
+        <div class="input-submit-row">
+          <button class="btn btn-amber" id="btnRun">
+            <span id="btnRunLabel">Run Pipeline</span>
+          </button>
+        </div>
+
+        <div class="pipeline-stages-preview">
+          <span class="stage-pill">01 · structural_decomposition</span>
+          <span class="stage-pill">02 · evidence_extraction</span>
+          <span class="stage-pill">03 · risk_analysis</span>
+          <span class="stage-pill">04 · comparative_context</span>
+          <span class="stage-pill">05 · executive_synthesis</span>
+        </div>
+      </div>
     </div>
-  </div>
+  </section>
+
+  <!-- ============================================================
+       VIEW: PIPELINE (running / refinement)
+  ============================================================ -->
+  <section class="view" id="view-pipeline">
+
+    <!-- Sidebar: stage nav -->
+    <aside class="pipeline-sidebar">
+      <div class="sidebar-header">
+        <div class="sidebar-header-top">
+          <div class="chip chip-amber" id="sidebarAttempt">Attempt 1</div>
+        </div>
+        <div class="sidebar-title" id="sidebarTitle">Running Pipeline</div>
+        <div class="sidebar-meta" id="sidebarFlowId"></div>
+      </div>
+
+      <div class="stage-list" id="sidebarStageList">
+        <!-- Populated by JS -->
+      </div>
+
+      <div class="sidebar-footer">
+        <div class="live-status">
+          <div class="pulse-dot dot-amber" id="sidebarLiveDot"></div>
+          <span id="sidebarLiveLabel">Streaming chunks…</span>
+        </div>
+        <div class="seq-counter" id="seqCounter">seq: 0 · chunks: 0</div>
+      </div>
+    </aside>
+
+    <!-- Main: stage output cards -->
+    <div class="pipeline-content">
+      <div class="pipeline-content-header">
+        <h2 id="pipelineHeading">Analysing abstract…</h2>
+      </div>
+      <div id="stageCards">
+        <!-- Populated by JS -->
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================
+       VIEW: APPROVAL GATE
+  ============================================================ -->
+  <section class="view" id="view-approval">
+
+    <!-- Decision sidebar -->
+    <aside class="approval-sidebar">
+      <div class="approval-sidebar-header">
+        <div class="approval-gate-title">Review &amp; Decide</div>
+        <div class="approval-gate-sub">
+          Read the executive summary carefully. Approve to finalise, or reject with
+          critique to trigger a refined iteration.
+        </div>
+        <div class="attempt-display">
+          Current attempt: <strong id="approvalAttemptNum">1</strong><br />
+          Flow: <strong id="approvalFlowId">—</strong>
+        </div>
+      </div>
+
+      <div class="critique-section">
+        <label class="field-label">Critique &amp; Instructions</label>
+        <textarea
+          id="critiqueInput"
+          placeholder="Describe what needs improvement…&#10;&#10;e.g. 'The risk section underestimates selection bias. Please expand the external validity section and clarify the statistical claims.'"
+        ></textarea>
+        <div class="field-hint" style="margin-top:6px;">// required on rejection · ignored on approval</div>
+
+        <div class="error-banner" id="approvalError" style="margin-top:14px;"></div>
+
+        <div class="approval-actions">
+          <button class="btn btn-emerald" id="btnApprove">
+            ✓ &nbsp; Approve &amp; Finalise
+          </button>
+          <button class="btn btn-ruby" id="btnReject">
+            ✗ &nbsp; Reject — Refine
+          </button>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Executive summary + stage outputs -->
+    <div class="approval-main">
+      <div class="approval-main-header">
+        <div class="section-eyebrow">Executive Summary — Attempt <span id="approvalAttemptLabel">1</span></div>
+        <h2>Review the Synthesis</h2>
+      </div>
+
+      <div class="exec-summary-display">
+        <div class="exec-summary-label">▸ Executive Summary</div>
+        <div class="exec-summary-text" id="approvalExecText">Loading…</div>
+      </div>
+
+      <div class="section-eyebrow">Full Stage Analysis</div>
+      <div id="approvalStageAccordions">
+        <!-- Populated by JS -->
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================
+       VIEW: COMPLETED
+  ============================================================ -->
+  <section class="view" id="view-completed">
+    <div class="completed-wrap">
+      <div class="completed-hero">
+        <div class="completed-icon-ring">✓</div>
+        <h2>Pipeline Complete</h2>
+        <p>The research evaluation has been reviewed, approved, and finalised.</p>
+        <div class="completed-meta-row">
+          <span class="chip chip-emerald" id="completedFlowChip">—</span>
+          <span class="chip chip-dust" id="completedAttemptsChip">—</span>
+          <span class="chip chip-dust">Model: Gemini</span>
+        </div>
+      </div>
+
+      <div class="section-eyebrow">Approved Executive Summary</div>
+      <div class="final-exec">
+        <div class="final-exec-label">
+          <span>▸</span> Final Output
+        </div>
+        <div class="final-exec-text" id="finalExecText"></div>
+      </div>
+
+      <div class="stage-results-wrap">
+        <div class="section-eyebrow">Full Stage Analysis</div>
+        <div id="completedAccordions">
+          <!-- Populated by JS -->
+        </div>
+      </div>
+
+      <div class="completed-actions">
+        <button class="btn btn-ghost" id="btnNewEval">← New Evaluation</button>
+      </div>
+    </div>
+  </section>
+
+</div><!-- /shell -->
+
+<script>
+/* ============================================================
+   ResearchBot2 — Frontend Application
+   Pure vanilla JS. No framework. No CDN runtime dependencies.
+
+   Architecture:
+   - State machine: IDLE → RUNNING → AWAITING_APPROVAL → (RUNNING) → COMPLETED
+   - Polling: GET /api/stream?flow_id=&after_sequence= every 2s
+   - Signals: POST /api/approval {flow_id, approved, critique}
+   - Stage outputs accumulate in stageArtifacts map and persist across refinements
+
+   Stage keys (ordered):
+     structural_decomposition
+     evidence_extraction
+     risk_analysis
+     comparative_context_generation
+     executive_summary_synthesis
+============================================================ */
+
+'use strict';
+
+// ---- Config ----
+const POLL_MS      = 2000;
+const STAGE_DEFS   = [
+  { key: 'structural_decomposition',       num: '01', label: 'Structural Decomposition',    short: 'Structure' },
+  { key: 'evidence_extraction',            num: '02', label: 'Evidence Extraction',         short: 'Evidence'  },
+  { key: 'risk_analysis',                  num: '03', label: 'Risk Analysis',               short: 'Risk'      },
+  { key: 'comparative_context_generation', num: '04', label: 'Comparative Context',         short: 'Context'   },
+  { key: 'executive_summary_synthesis',    num: '05', label: 'Executive Summary Synthesis', short: 'Summary'   },
+];
+
+// ---- Application State ----
+const S = {
+  flowId:        null,
+  lastSeq:       0,
+  attempt:       1,
+  pollTimer:     null,
+  artifacts:     {},   // stage key -> text
+  stageStatus:   {},   // stage key -> 'idle'|'active'|'done'
+  execSummary:   '',
+  totalAttempts: 1,
+  chunkCount:    0,
+};
+
+// ---- DOM helpers ----
+const $  = id => document.getElementById(id);
+const el = (tag, cls, text) => {
+  const e = document.createElement(tag);
+  if (cls)  e.className   = cls;
+  if (text) e.textContent = text;
+  return e;
+};
+
+// ---- View management ----
+const VIEWS = ['input', 'pipeline', 'approval', 'completed'];
+
+function showView(name) {
+  VIEWS.forEach(v => {
+    const el = $(`view-${v}`);
+    if (el) el.classList.toggle('active', v === name);
+  });
+}
+
+// ---- Status bar ----
+function setStatus(dotClass, label) {
+  const dot = $('statusDot');
+  dot.className = `pulse-dot ${dotClass}`;
+  $('statusLabel').textContent = label;
+  $('topbarStatus').style.display = 'flex';
+}
+
+// ---- Error banners ----
+function showErr(id, msg) { const e=$(id); e.textContent=msg; e.classList.add('visible'); }
+function hideErr(id)       { const e=$(id); e.textContent='';  e.classList.remove('visible'); }
+
+// ---- Generate request ID ----
+function genId() {
+  const ts   = Date.now().toString(36).toUpperCase();
+  const rand = Math.random().toString(36).substring(2,6).toUpperCase();
+  return `EVAL-${ts}-${rand}`;
+}
+
+// ---- Build sidebar stage list ----
+function buildSidebar() {
+  const list = $('sidebarStageList');
+  list.innerHTML = '';
+  STAGE_DEFS.forEach(def => {
+    S.stageStatus[def.key] = 'idle';
+    const item = document.createElement('div');
+    item.className = 'stage-item';
+    item.id = `sbar-${def.key}`;
+    item.onclick = () => scrollToCard(def.key);
+    item.innerHTML = `
+      <div class="stage-bullet bullet-idle" id="sbullet-${def.key}">${def.num}</div>
+      <div class="stage-item-info">
+        <div class="stage-item-name">${def.label}</div>
+        <div class="stage-item-status" id="sstatus-${def.key}">Waiting</div>
+      </div>`;
+    list.appendChild(item);
+  });
+}
+
+// ---- Build output cards in main panel ----
+function buildStageCards() {
+  const wrap = $('stageCards');
+  wrap.innerHTML = '';
+  STAGE_DEFS.forEach(def => {
+    const card = document.createElement('div');
+    card.className = 'output-card';
+    card.id = `card-${def.key}`;
+    card.innerHTML = `
+      <div class="output-card-head" onclick="toggleCard('${def.key}')">
+        <div class="card-head-icon card-icon-idle" id="cicon-${def.key}">${def.num}</div>
+        <div class="card-head-info">
+          <div class="card-head-name">${def.label}</div>
+          <div class="card-head-subtitle" id="csub-${def.key}">Waiting for pipeline…</div>
+        </div>
+        <div class="card-head-right">
+          <div class="card-chevron" id="cchev-${def.key}">▶</div>
+        </div>
+      </div>
+      <div id="cloadbar-${def.key}"></div>
+      <div class="output-card-body">
+        <div class="output-card-content">
+          <div class="prose" id="coutput-${def.key}">No output yet.</div>
+        </div>
+      </div>`;
+    wrap.appendChild(card);
+  });
+}
+
+function scrollToCard(key) {
+  const card = $(`card-${key}`);
+  if (card) card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+window.toggleCard = function(key) {
+  const card = $(`card-${key}`);
+  if (!card) return;
+  card.classList.toggle('expanded');
+  const chev = $(`cchev-${key}`);
+  if (chev) chev.classList.toggle('open', card.classList.contains('expanded'));
+};
+
+// ---- Update sidebar item state ----
+function setSidebarStage(key, state) {
+  const item    = $(`sbar-${key}`);
+  const bullet  = $(`sbullet-${key}`);
+  const statusEl = $(`sstatus-${key}`);
+  if (!item) return;
+
+  item.classList.toggle('active-stage', state === 'active');
+  item.classList.toggle('done-stage',   state === 'done');
+
+  if (state === 'active') {
+    bullet.className = 'stage-bullet bullet-active';
+    bullet.innerHTML = '<div class="spinner spinner-sm"></div>';
+    if (statusEl) statusEl.textContent = 'Running…';
+  } else if (state === 'done') {
+    const def = STAGE_DEFS.find(d => d.key === key);
+    bullet.className = 'stage-bullet bullet-done';
+    bullet.textContent = def ? def.num : '✓';
+    if (statusEl) statusEl.textContent = 'Completed';
+  } else {
+    const def = STAGE_DEFS.find(d => d.key === key);
+    bullet.className = 'stage-bullet bullet-idle';
+    bullet.textContent = def ? def.num : '—';
+    if (statusEl) statusEl.textContent = 'Waiting';
+  }
+}
+
+// ---- Update output card state ----
+function setCardState(key, state, text) {
+  const card   = $(`card-${key}`);
+  const icon   = $(`cicon-${key}`);
+  const sub    = $(`csub-${key}`);
+  const output = $(`coutput-${key}`);
+  const lbar   = $(`cloadbar-${key}`);
+  const def    = STAGE_DEFS.find(d => d.key === key);
+  if (!card) return;
+
+  card.classList.toggle('card-active', state === 'active');
+  card.classList.toggle('card-done',   state === 'done');
+
+  if (state === 'active') {
+    icon.className   = 'card-head-icon card-icon-active';
+    icon.innerHTML   = '<div class="spinner"></div>';
+    if (sub) sub.textContent = 'Processing…';
+  } else if (state === 'calling') {
+    icon.className   = 'card-head-icon card-icon-active';
+    icon.innerHTML   = '<div class="spinner"></div>';
+    if (sub) sub.textContent = 'Calling Gemini API…';
+    if (lbar) lbar.innerHTML = '<div class="api-loading-bar"></div>';
+  } else if (state === 'done') {
+    icon.className   = 'card-head-icon card-icon-done';
+    icon.textContent = '✓';
+    if (sub) sub.textContent = 'Completed';
+    if (lbar) lbar.innerHTML = '';
+    // Auto-expand exec summary
+    if (key === 'executive_summary_synthesis') {
+      card.classList.add('expanded');
+      const chev = $(`cchev-${key}`);
+      if (chev) chev.classList.add('open');
+    }
+  } else {
+    icon.className   = 'card-head-icon card-icon-idle';
+    icon.textContent = def ? def.num : '—';
+    if (sub) sub.textContent = 'Waiting for pipeline…';
+    if (lbar) lbar.innerHTML = '';
+  }
+
+  if (text && output) {
+    output.textContent = text;
+    S.artifacts[key]   = text;
+  }
+
+  S.stageStatus[key] = state;
+}
+
+// ---- Build approval stage accordions ----
+function buildApprovalAccordions() {
+  const container = $('approvalStageAccordions');
+  container.innerHTML = '';
+  STAGE_DEFS.filter(d => d.key !== 'executive_summary_synthesis').forEach(def => {
+    const text = S.artifacts[def.key];
+    if (!text) return;
+    container.appendChild(makeAccordion(def.label, text));
+  });
+}
+
+function makeAccordion(title, text) {
+  const wrap = document.createElement('div');
+  wrap.className = 'accord';
+  wrap.innerHTML = `
+    <div class="accord-head" onclick="this.parentElement.classList.toggle('open');
+      this.querySelector('.accord-arrow').classList.toggle('open', this.parentElement.classList.contains('open'))">
+      <div class="accord-head-left">
+        <span class="accord-title">${title}</span>
+      </div>
+      <span class="accord-arrow">▶</span>
+    </div>
+    <div class="accord-body">
+      <div class="accord-content">
+        <div class="prose">${escHtml(text)}</div>
+      </div>
+    </div>`;
+  return wrap;
+}
+
+function escHtml(str) {
+  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ---- Chunk processor ----
+function processChunk(chunk) {
+  const { stage, status, attempt, artifact } = chunk;
+  S.chunkCount++;
+
+  // Update attempt display
+  if (attempt && attempt !== S.attempt) {
+    S.attempt = attempt;
+    $('sidebarAttempt').textContent = `Attempt ${attempt}`;
+    $('pipelineHeading').textContent = `Refinement — Attempt ${attempt}`;
+  }
+
+  // Update seq counter
+  $('seqCounter').textContent = `seq: ${chunk.sequence} · chunks: ${S.chunkCount}`;
+  $('topbarFlowId').style.display = 'block';
+
+  switch (stage) {
+
+    case 'pipeline':
+      if (status === 'started') {
+        setStatus('dot-amber', 'Pipeline running');
+        $('pipelineHeading').textContent = 'Analysing abstract…';
+        $('sidebarTitle').textContent = 'Pipeline Running';
+      }
+      if (status === 'completed') {
+        S.totalAttempts = (artifact && artifact.total_attempts) || S.attempt;
+        if (artifact && artifact.executive_summary) {
+          S.execSummary = artifact.executive_summary;
+        }
+        // handled in poll loop
+      }
+      break;
+
+    case 'refinement':
+      if (status === 'started') {
+        setStatus('dot-amber', `Refining — attempt ${attempt}`);
+        $('sidebarTitle').textContent = `Refinement #${attempt}`;
+        // Reset exec summary card only
+        setCardState('executive_summary_synthesis', 'idle', null);
+        setSidebarStage('executive_summary_synthesis', 'idle');
+      }
+      break;
+
+    case 'structural_decomposition':
+    case 'evidence_extraction':
+    case 'risk_analysis':
+    case 'comparative_context_generation':
+    case 'executive_summary_synthesis': {
+      const cardState = status === 'completed' ? 'done'
+                      : status === 'calling_api' ? 'calling'
+                      : (status === 'started' || status === 'processing') ? 'active'
+                      : 'idle';
+      const text = artifact && artifact.text ? artifact.text : null;
+      setCardState(stage, cardState, text);
+      setSidebarStage(stage, status === 'completed' ? 'done' : cardState === 'idle' ? 'idle' : 'active');
+
+      if (status === 'started') {
+        const def = STAGE_DEFS.find(d => d.key === stage);
+        $('pipelineHeading').textContent = `Running: ${def ? def.label : stage}`;
+        setStatus('dot-amber', def ? def.short : stage);
+        scrollToCard(stage);
+      }
+      if (status === 'completed' && stage === 'executive_summary_synthesis' && text) {
+        S.execSummary = text;
+      }
+      break;
+    }
+
+    case 'awaiting_approval':
+      if (status === 'pending') {
+        if (artifact && artifact.executive_summary) {
+          S.execSummary = artifact.executive_summary;
+        }
+        setStatus('dot-ruby', 'Awaiting approval');
+        $('sidebarLiveDot').className = 'pulse-dot dot-ruby';
+        $('sidebarLiveLabel').textContent = 'Awaiting your review…';
+        showApprovalView();
+      }
+      break;
+
+    case 'approval_received':
+      hideErr('approvalError');
+      if (status === 'approved') {
+        setStatus('dot-emerald', 'Finalising');
+        $('sidebarLiveDot').className = 'pulse-dot dot-amber';
+        $('sidebarLiveLabel').textContent = 'Streaming chunks…';
+        showView('pipeline');
+      } else {
+        // Rejected — switch back to pipeline view for refinement
+        showView('pipeline');
+        setStatus('dot-amber', 'Refining…');
+        $('sidebarLiveDot').className = 'pulse-dot dot-amber';
+        $('sidebarLiveLabel').textContent = 'Streaming chunks…';
+      }
+      break;
+  }
+}
+
+// ---- Show approval view ----
+function showApprovalView() {
+  $('approvalExecText').textContent = S.execSummary || 'Executive summary not found.';
+  $('approvalAttemptNum').textContent = S.attempt;
+  $('approvalAttemptLabel').textContent = S.attempt;
+  $('approvalFlowId').textContent = S.flowId;
+  $('critiqueInput').value = '';
+  hideErr('approvalError');
+  buildApprovalAccordions();
+  showView('approval');
+}
+
+// ---- Show completed view ----
+function showCompletedView() {
+  const summary = S.artifacts['executive_summary_synthesis'] || S.execSummary;
+  $('finalExecText').textContent = summary;
+  $('completedFlowChip').textContent = S.flowId;
+  $('completedAttemptsChip').textContent = `Attempts: ${S.totalAttempts}`;
+
+  // Build accordions for all stages
+  const wrap = $('completedAccordions');
+  wrap.innerHTML = '';
+  STAGE_DEFS.forEach(def => {
+    const text = S.artifacts[def.key];
+    if (text) wrap.appendChild(makeAccordion(def.label, text));
+  });
+
+  setStatus('dot-emerald', 'Completed');
+  showView('completed');
+}
+
+// ---- Polling ----
+async function poll() {
+  if (!S.flowId) return;
+  const url = `/api/stream?flow_id=${encodeURIComponent(S.flowId)}&after_sequence=${S.lastSeq}`;
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const chunks = data.chunks || [];
+    chunks.forEach(c => {
+      if (c.sequence > S.lastSeq) S.lastSeq = c.sequence;
+      processChunk(c);
+    });
+
+    // Terminal condition
+    const last = chunks[chunks.length - 1];
+    const done = data.completed || (last && last.stage === 'pipeline' && last.status === 'completed');
+    if (done) {
+      stopPoll();
+      showCompletedView();
+    }
+  } catch (e) {
+    // Network error — continue polling
+    console.warn('Poll error:', e);
+  }
+}
+
+function startPoll() {
+  stopPoll();
+  S.pollTimer = setInterval(poll, POLL_MS);
+  poll(); // immediate
+}
+
+function stopPoll() {
+  if (S.pollTimer) { clearInterval(S.pollTimer); S.pollTimer = null; }
+}
+
+// ---- Start pipeline ----
+async function startPipeline() {
+  hideErr('inputError');
+  const apiKey    = $('apiKey').value.trim();
+  const requestId = $('requestId').value.trim();
+  const abstract  = $('abstract').value.trim();
+
+  if (!apiKey)    { showErr('inputError', 'Gemini API key is required.'); return; }
+  if (!requestId) { showErr('inputError', 'Request ID is required.'); return; }
+  if (!abstract || abstract.length < 10) { showErr('inputError', 'Please paste a valid abstract (minimum 10 characters).'); return; }
+
+  $('btnRun').disabled = true;
+  $('btnRunLabel').textContent = 'Starting…';
+
+  try {
+    const resp = await fetch('/api/run', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ request_id: requestId, abstract, gemini_api_key: apiKey }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+
+    // Init state
+    const flowId = data.flow_id || `research:${requestId}`;
+    Object.assign(S, {
+      flowId, lastSeq: 0, attempt: 1,
+      artifacts: {}, stageStatus: {},
+      execSummary: '', totalAttempts: 1, chunkCount: 0,
+    });
+
+    // Prime stage statuses
+    STAGE_DEFS.forEach(d => { S.stageStatus[d.key] = 'idle'; });
+
+    // Update topbar
+    $('topbarFlowId').textContent = flowId;
+
+    // Build pipeline UI
+    buildSidebar();
+    buildStageCards();
+    $('sidebarFlowId').textContent = flowId;
+    $('sidebarAttempt').textContent = 'Attempt 1';
+    $('sidebarTitle').textContent = 'Pipeline Running';
+    $('sidebarLiveDot').className = 'pulse-dot dot-amber';
+    $('sidebarLiveLabel').textContent = 'Streaming chunks…';
+    $('pipelineHeading').textContent = 'Analysing abstract…';
+    $('seqCounter').textContent = 'seq: 0 · chunks: 0';
+
+    showView('pipeline');
+    setStatus('dot-amber', 'Running');
+    startPoll();
+
+  } catch (err) {
+    showErr('inputError', `Failed to start pipeline: ${err.message}`);
+    $('btnRun').disabled = false;
+    $('btnRunLabel').textContent = 'Run Pipeline';
+  }
+}
+
+// ---- Submit approval ----
+async function submitApproval(approved) {
+  hideErr('approvalError');
+  const critique = $('critiqueInput').value.trim();
+  if (!approved && !critique) {
+    showErr('approvalError', 'Critique is required when rejecting — describe what needs improvement.');
+    return;
+  }
+
+  $('btnApprove').disabled = true;
+  $('btnReject').disabled  = true;
+
+  try {
+    const resp = await fetch('/api/approval', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ flow_id: S.flowId, approved, critique }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+
+    // Re-enable after short delay (in case approval_received chunk hasn't arrived yet)
+    setTimeout(() => {
+      $('btnApprove').disabled = false;
+      $('btnReject').disabled  = false;
+    }, 4000);
+
+  } catch (err) {
+    showErr('approvalError', `Failed to submit: ${err.message}`);
+    $('btnApprove').disabled = false;
+    $('btnReject').disabled  = false;
+  }
+}
+
+// ---- Reset ----
+function resetAll() {
+  stopPoll();
+  Object.assign(S, {
+    flowId: null, lastSeq: 0, attempt: 1,
+    artifacts: {}, stageStatus: {},
+    execSummary: '', totalAttempts: 1, chunkCount: 0,
+    pollTimer: null,
+  });
+  $('topbarFlowId').textContent = '';
+  $('topbarFlowId').style.display = 'none';
+  $('btnRun').disabled = false;
+  $('btnRunLabel').textContent = 'Run Pipeline';
+  setStatus('dot-dust', 'Ready');
+  showView('input');
+}
+
+// ======================================================
+// Event Listeners
+// ======================================================
+
+// Input view
+$('genId').addEventListener('click', () => { $('requestId').value = genId(); });
+
+$('toggleKey').addEventListener('click', () => {
+  const inp = $('apiKey');
+  const shown = inp.type === 'text';
+  inp.type = shown ? 'password' : 'text';
+  $('toggleKey').textContent = shown ? 'show' : 'hide';
+});
+
+$('btnRun').addEventListener('click', startPipeline);
+
+$('requestId').addEventListener('keydown', e => { if (e.key === 'Enter') startPipeline(); });
+
+// Approval view
+$('btnApprove').addEventListener('click', () => submitApproval(true));
+$('btnReject').addEventListener('click',  () => submitApproval(false));
+
+// Completed view
+$('btnNewEval').addEventListener('click', resetAll);
+
+// Init
+$('requestId').value = genId();
+setStatus('dot-dust', 'Ready');
+</script>
 </body>
 </html>
