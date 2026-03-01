@@ -366,7 +366,7 @@ def submit_approval(flow_id: str, approved: bool, critique: str) -> None:
 # No parallelisation — stages execute strictly serially.
 # ---------------------------------------------------------------------------
 
-@fc.flow("research:{request_id}")
+@fc.flow
 def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
     """
     Orchestrate the full research evaluation pipeline.
@@ -383,9 +383,10 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
       6. Loop is unlimited; no attempt cap.
     """
 
-    # Immutable flow identity — matches the Temporal workflow ID assigned by the
-    # platform using the template "research:{request_id}" passed to @fc.flow.
-    # GET /api/stream and POST /api/approval must use this exact value.
+    # flow_id is embedded in every yielded chunk. The UI extracts it from the
+    # first chunk of the POST /api/run SSE stream rather than constructing it
+    # client-side, so any value is fine as long as it is stable and unique.
+    # We use "research:{request_id}" as a human-readable namespaced identifier.
     flow_id: str = f"research:{request_id}"
 
     # Local sequence counter — authoritative ordering for this stream.

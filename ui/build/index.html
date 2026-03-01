@@ -1338,7 +1338,8 @@
 'use strict';
 
 // ---- Config ----
-const POLL_MS      = 2000;
+// POLL_MS removed — the UI no longer polls GET /api/stream.
+// Chunks are consumed directly from the POST /api/run SSE response body.
 const STAGE_DEFS   = [
   { key: 'structural_decomposition',       num: '01', label: 'Structural Decomposition',    short: 'Structure' },
   { key: 'evidence_extraction',            num: '02', label: 'Evidence Extraction',         short: 'Evidence'  },
@@ -1352,9 +1353,9 @@ const S = {
   flowId:        null,
   lastSeq:       0,
   attempt:       1,
-  pollTimer:     null,
-  artifacts:     {},   // stage key -> text
-  stageStatus:   {},   // stage key -> 'idle'|'active'|'done'
+  streamReader:  null,  // active ReadableStreamDefaultReader, cancelled on reset
+  artifacts:     {},    // stage key -> text
+  stageStatus:   {},    // stage key -> 'idle'|'active'|'done'
   execSummary:   '',
   totalAttempts: 1,
   chunkCount:    0,
@@ -1720,42 +1721,98 @@ function showCompletedView() {
   showView('completed');
 }
 
-// ---- Polling ----
-async function poll() {
-  if (!S.flowId) return;
-  const url = `/api/stream?flow_id=${encodeURIComponent(S.flowId)}&after_sequence=${S.lastSeq}`;
-  try {
-    const resp = await fetch(url);
-    if (!resp.ok) return;
-    const data = await resp.json();
-    const chunks = data.chunks || [];
-    chunks.forEach(c => {
-      if (c.sequence > S.lastSeq) S.lastSeq = c.sequence;
-      processChunk(c);
-    });
+// ---- SSE stream consumer ----
+// Reads chunks directly from the POST /api/run response body.
+// The Oryonix platform streams SSE events from the POST endpoint itself —
+// GET /api/stream is a separate reconnection/replay mechanism that requires
+// a working Temporal workflow lookup by ID, which is not reliable in this env.
+// Consuming the POST response body directly is the correct primary approach:
+// the stream stays open through the approval gate pause and resumes automatically
+// when POST /api/approval fires the signal.
+//
+// SSE wire format from the platform:
+//   event:message\ndata:{json}\n\n
+//   ...
+//   event:message\ndata:STREAM_COMPLETED\n\n  (or stream closes)
+async function consumeStream(resp) {
+  const reader = resp.body.getReader();
+  S.streamReader = reader;           // stored so resetAll() can cancel it
+  const decoder = new TextDecoder();
+  let buffer = '';
 
-    // Terminal condition: platform sets data.completed=true OR we see the
-    // pipeline_complete chunk (stage name from server: 'pipeline_complete').
-    const last = chunks[chunks.length - 1];
-    const done = data.completed || (last && last.stage === 'pipeline_complete');
-    if (done) {
-      stopPoll();
-      showCompletedView();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+
+      if (done) {
+        // Server closed the connection — treat as completion.
+        showCompletedView();
+        return;
+      }
+
+      buffer += decoder.decode(value, { stream: true });
+
+      // SSE events are delimited by a blank line (\n\n).
+      // Split on \n\n; keep the trailing incomplete fragment in buffer.
+      const events = buffer.split('\n\n');
+      buffer = events.pop(); // last element may be incomplete
+
+      for (const event of events) {
+        if (!event.trim()) continue;
+
+        // Extract the data: line from the event block.
+        // An event may have an event: line before data: — we ignore it.
+        const dataLine = event.split('\n').find(l => l.startsWith('data:'));
+        if (!dataLine) continue;
+
+        const dataStr = dataLine.slice(5).trim(); // strip 'data:' prefix
+
+        // STREAM_COMPLETED sentinel — platform signals no more chunks.
+        if (dataStr === 'STREAM_COMPLETED' || dataStr === '"STREAM_COMPLETED"') {
+          showCompletedView();
+          return;
+        }
+
+        let chunk;
+        try {
+          chunk = JSON.parse(dataStr);
+        } catch (e) {
+          console.warn('ResearchBot: failed to parse SSE data line:', dataStr, e);
+          continue;
+        }
+
+        // On the very first chunk, extract flow_id from the payload.
+        // This is more reliable than constructing it client-side because the
+        // server is the source of truth for what flow_id was actually assigned.
+        if (!S.flowId && chunk.flow_id) {
+          S.flowId = chunk.flow_id;
+          $('topbarFlowId').textContent  = S.flowId;
+          $('sidebarFlowId').textContent = S.flowId;
+        }
+
+        // Track highest sequence seen (used by approval POST and display).
+        if (chunk.sequence > S.lastSeq) S.lastSeq = chunk.sequence;
+
+        processChunk(chunk);
+
+        // Terminal condition: pipeline_complete chunk means the flow has finished
+        // and the generator returned. Don't wait for stream close.
+        if (chunk.stage === 'pipeline_complete') {
+          showCompletedView();
+          return;
+        }
+      }
     }
   } catch (e) {
-    // Network error — continue polling
-    console.warn('Poll error:', e);
+    // AbortError is expected if resetAll() cancels the reader — not a real error.
+    if (e.name !== 'AbortError') {
+      console.error('ResearchBot: stream read error:', e);
+      showErr('inputError', `Stream error: ${e.message}`);
+    }
+  } finally {
+    S.streamReader = null;
+    try { reader.releaseLock(); } catch (_) {}
   }
-}
-
-function startPoll() {
-  stopPoll();
-  S.pollTimer = setInterval(poll, POLL_MS);
-  poll(); // immediate
-}
-
-function stopPoll() {
-  if (S.pollTimer) { clearInterval(S.pollTimer); S.pollTimer = null; }
 }
 
 // ---- Start pipeline ----
@@ -1779,51 +1836,58 @@ async function startPipeline() {
       body:    JSON.stringify({ request_id: requestId, abstract, gemini_api_key: apiKey }),
     });
 
-    // The Oryonix platform streams SSE directly from POST /api/run (content-type:
-    // text/event-stream). We must NOT call resp.json() on a streaming response —
-    // that would fail immediately. For error responses (non-2xx) the platform does
-    // return application/json, so we only parse the body on failure.
+    // On non-2xx the platform returns application/json — parse and surface the error.
+    // On 200 the platform immediately begins streaming SSE — do NOT call resp.json().
     if (!resp.ok) {
       let errMsg = `HTTP ${resp.status}`;
       try {
         const errData = await resp.json();
         errMsg = errData.error || errData.message || errData.detail || errMsg;
-      } catch (_) { /* body not JSON — use status code message */ }
+      } catch (_) {}
       throw new Error(errMsg);
     }
 
-    // Flow ID must match the Temporal workflow ID assigned by the platform.
-    // The @fc.flow("research:{request_id}") template causes the platform to
-    // construct the Temporal execution ID as "research:{request_id}".
-    // GET /api/stream and POST /api/approval must use this exact string.
-    const flowId = `research:${requestId}`;
-    // Init state
+    // Init state. flowId will be populated from the first SSE chunk by consumeStream.
+    // We set a provisional value now so sidebar/topbar have something to display
+    // immediately; consumeStream will overwrite it with the server-authoritative value.
+    const provisionalFlowId = `research:${requestId}`;
     Object.assign(S, {
-      flowId, lastSeq: 0, attempt: 1,
-      artifacts: {}, stageStatus: {},
-      execSummary: '', totalAttempts: 1, chunkCount: 0,
+      flowId:      provisionalFlowId,
+      lastSeq:     0,
+      attempt:     1,
+      streamReader: null,
+      artifacts:   {},
+      stageStatus: {},
+      execSummary: '',
+      totalAttempts: 1,
+      chunkCount:  0,
     });
 
     // Prime stage statuses
     STAGE_DEFS.forEach(d => { S.stageStatus[d.key] = 'idle'; });
 
     // Update topbar
-    $('topbarFlowId').textContent = flowId;
+    $('topbarFlowId').textContent      = provisionalFlowId;
+    $('topbarFlowId').style.display    = 'block';
 
     // Build pipeline UI
     buildSidebar();
     buildStageCards();
-    $('sidebarFlowId').textContent = flowId;
-    $('sidebarAttempt').textContent = 'Attempt 1';
-    $('sidebarTitle').textContent = 'Pipeline Running';
-    $('sidebarLiveDot').className = 'pulse-dot dot-amber';
-    $('sidebarLiveLabel').textContent = 'Streaming chunks…';
-    $('pipelineHeading').textContent = 'Analysing abstract…';
-    $('seqCounter').textContent = 'seq: 0 · chunks: 0';
+    $('sidebarFlowId').textContent     = provisionalFlowId;
+    $('sidebarAttempt').textContent    = 'Attempt 1';
+    $('sidebarTitle').textContent      = 'Pipeline Running';
+    $('sidebarLiveDot').className      = 'pulse-dot dot-amber';
+    $('sidebarLiveLabel').textContent  = 'Streaming chunks…';
+    $('pipelineHeading').textContent   = 'Analysing abstract…';
+    $('seqCounter').textContent        = 'seq: 0 · chunks: 0';
 
     showView('pipeline');
     setStatus('dot-amber', 'Running');
-    startPoll();
+
+    // Fire-and-forget the stream consumer. Errors are surfaced inside consumeStream.
+    consumeStream(resp).catch(err => {
+      console.error('ResearchBot: consumeStream rejected:', err);
+    });
 
   } catch (err) {
     showErr('inputError', `Failed to start pipeline: ${err.message}`);
@@ -1868,12 +1932,16 @@ async function submitApproval(approved) {
 
 // ---- Reset ----
 function resetAll() {
-  stopPoll();
+  // Cancel the live SSE stream reader if one is active.
+  if (S.streamReader) {
+    try { S.streamReader.cancel(); } catch (_) {}
+    S.streamReader = null;
+  }
   Object.assign(S, {
     flowId: null, lastSeq: 0, attempt: 1,
+    streamReader: null,
     artifacts: {}, stageStatus: {},
     execSummary: '', totalAttempts: 1, chunkCount: 0,
-    pollTimer: null,
   });
   $('topbarFlowId').textContent = '';
   $('topbarFlowId').style.display = 'none';
