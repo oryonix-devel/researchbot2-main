@@ -83,11 +83,11 @@ paths:
       summary: Poll for streaming chunks from a running pipeline
       description: >
         Platform-managed pull-based polling endpoint. The Oryonix platform serves
-        this route directly from its internal streaming database — no operationId
-        or main.py implementation is declared or permitted for this path.
-        The platform identifies this as a built-in route by the absence of an
-        operationId; if an operationId were present the platform would attempt
-        to dispatch to a Python function with that name, which does not exist.
+        this route directly from its internal streaming database using the reserved
+        built-in operationId 'get_stream_chunks'. The operationId is required for
+        spec validation AND signals to the platform that this route should be
+        handled by its internal streaming DB layer rather than dispatched to a
+        developer Python function. No implementation in main.py exists or is needed.
 
         Returns a batch of ResearchChunk objects persisted to the streaming
         database by the running workflow. Poll repeatedly (recommended: 2000ms)
@@ -96,6 +96,7 @@ paths:
         Chunks are returned in ascending sequence order. Pass 'after_sequence'
         set to the highest sequence number seen to receive only new chunks.
         The 'sequence' field is the authoritative ordering key.
+      operationId: get_stream_chunks
       parameters:
         - name: flow_id
           in: query
