@@ -27,7 +27,7 @@ import fc
 
 # ---------------------------------------------------------------------------
 # Global approval registry
-# Keyed by flow_id ("research:{request_id}").
+# Keyed by flow_id (equals raw request_id — the Temporal workflow ID).
 # Written exclusively by the @fc.signal submit_approval.
 # Read exclusively by fc.wait_for_condition inside run_research_pipeline.
 # Replayed deterministically by Temporal's event-sourced execution model.
@@ -341,7 +341,7 @@ def submit_approval(flow_id: str, approved: bool, critique: str) -> None:
     The orchestrating flow unblocks when it detects its flow_id present.
 
     Signal payload (§11):
-      flow_id  — "research:{request_id}" (must match exactly)
+      flow_id  — equals request_id supplied to POST /api/run
       approved — true: pipeline accepted; false: trigger refinement iteration
       critique — human feedback text; used in refinement prompt on rejection
     """
@@ -366,13 +366,13 @@ def submit_approval(flow_id: str, approved: bool, critique: str) -> None:
 # No parallelisation — stages execute strictly serially.
 # ---------------------------------------------------------------------------
 
-@fc.flow(id_template="research:{request_id}")
+@fc.flow
 def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
     """
     Orchestrate the full research evaluation pipeline.
 
     Flow ID: research:{request_id}  (set externally at flow start time)
-    The flow_id is derived deterministically from the client-supplied request_id.
+    The flow_id IS the request_id — the platform uses it as the Temporal workflow ID.
 
     Execution model:
       1. Run five serial pipeline stage compute functions.
@@ -383,9 +383,12 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
       6. Loop is unlimited; no attempt cap.
     """
 
-    # Immutable flow identity derived from client-provided request_id.
-    # Survives replay, retry, and crash.
-    flow_id: str = f"research:{request_id}"
+    # Immutable flow identity — equals the platform-assigned Temporal workflow ID.
+    # The Oryonix SDK (bare @fc.flow) uses the first parameter value (request_id)
+    # as the Temporal workflow execution ID directly, with no prefix.
+    # All routing — GET /api/stream?flow_id=, POST /api/approval body.flow_id,
+    # fc.wait_for_condition, and every yielded chunk — must use this exact value.
+    flow_id: str = request_id
 
     # Local sequence counter — authoritative ordering for this stream.
     # Never derived from DB chunk_id; never assumed contiguous externally.
