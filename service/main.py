@@ -366,7 +366,7 @@ def submit_approval(flow_id: str, approved: bool, critique: str) -> None:
 # No parallelisation — stages execute strictly serially.
 # ---------------------------------------------------------------------------
 
-@fc.flow
+@fc.flow(id_template="research:{request_id}")
 def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
     """
     Orchestrate the full research evaluation pipeline.
