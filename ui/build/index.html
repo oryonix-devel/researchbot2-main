@@ -1792,12 +1792,11 @@ async function startPipeline() {
       throw new Error(errMsg);
     }
 
-    // Flow ID equals the platform-assigned Temporal workflow ID: the raw request_id.
-    // The bare @fc.flow decorator causes the platform to use the first parameter
-    // value directly. Do NOT add a "research:" prefix — that would mismatch the
-    // actual Temporal execution ID and cause GET /api/stream and POST /api/approval
-    // to fail to route to the running workflow.
-    const flowId = requestId;
+    // Flow ID must match the Temporal workflow ID assigned by the platform.
+    // The @fc.flow("research:{request_id}") template causes the platform to
+    // construct the Temporal execution ID as "research:{request_id}".
+    // GET /api/stream and POST /api/approval must use this exact string.
+    const flowId = `research:${requestId}`;
     // Init state
     Object.assign(S, {
       flowId, lastSeq: 0, attempt: 1,

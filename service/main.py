@@ -366,7 +366,7 @@ def submit_approval(flow_id: str, approved: bool, critique: str) -> None:
 # No parallelisation — stages execute strictly serially.
 # ---------------------------------------------------------------------------
 
-@fc.flow
+@fc.flow("research:{request_id}")
 def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
     """
     Orchestrate the full research evaluation pipeline.
@@ -383,12 +383,10 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
       6. Loop is unlimited; no attempt cap.
     """
 
-    # Immutable flow identity — equals the platform-assigned Temporal workflow ID.
-    # The Oryonix SDK (bare @fc.flow) uses the first parameter value (request_id)
-    # as the Temporal workflow execution ID directly, with no prefix.
-    # All routing — GET /api/stream?flow_id=, POST /api/approval body.flow_id,
-    # fc.wait_for_condition, and every yielded chunk — must use this exact value.
-    flow_id: str = request_id
+    # Immutable flow identity — matches the Temporal workflow ID assigned by the
+    # platform using the template "research:{request_id}" passed to @fc.flow.
+    # GET /api/stream and POST /api/approval must use this exact value.
+    flow_id: str = f"research:{request_id}"
 
     # Local sequence counter — authoritative ordering for this stream.
     # Never derived from DB chunk_id; never assumed contiguous externally.

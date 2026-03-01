@@ -22,7 +22,7 @@ paths:
       description: >
         Starts a new durable research evaluation workflow.
         The client MUST supply a globally unique request_id.
-        The workflow is assigned the flow ID equal to the raw request_id value..
+        The workflow is assigned the flow ID "research:{request_id}".
         The response is a pull-based stream of JSON chunks.
         Each chunk conforms to the ResearchChunk schema.
         The stream is terminated by the platform-appended STREAM_COMPLETED sentinel.
@@ -102,11 +102,11 @@ paths:
           in: query
           required: true
           description: >
-            The flow ID to retrieve chunks for. Equals the raw request_id value supplied to POST /api/run.
+            The flow ID to retrieve chunks for. Format: "research:{request_id}".
             Must match the flow_id returned by POST /api/run exactly.
           schema:
             type: string
-            example: "abc123"
+            example: "research:abc123"
         - name: after_sequence
           in: query
           required: false
@@ -155,7 +155,7 @@ paths:
       description: >
         Sends a signal to a paused research evaluation workflow.
         The target workflow must be paused at the awaiting_approval stage.
-        The flow_id must exactly equal the request_id supplied to POST /api/run.
+        The flow_id must match exactly: "research:{request_id}".
 
         If approved=true the workflow proceeds to emit a pipeline_complete chunk
         and terminates.
@@ -174,13 +174,13 @@ paths:
               approve:
                 summary: Approve the current summary
                 value:
-                  flow_id: "abc123"
+                  flow_id: "research:abc123"
                   approved: true
                   critique: ""
               reject:
                 summary: Reject with critique
                 value:
-                  flow_id: "abc123"
+                  flow_id: "research:abc123"
                   approved: false
                   critique: "The risk assessment is too optimistic. Please strengthen the methodological risk section."
       responses:
@@ -256,9 +256,9 @@ components:
           type: string
           description: >
             Client-supplied globally unique identifier for this research evaluation run.
-            The value IS the flow ID — used verbatim as the Temporal workflow ID.
+            Used to construct the immutable flow ID: "research:{request_id}".
             Must be present; no auto-generation fallback exists.
-          example: "abc123"
+          example: "research:abc123"
           minLength: 1
         abstract:
           type: string
@@ -284,9 +284,9 @@ components:
         flow_id:
           type: string
           description: >
-            Exact flow ID of the target workflow. Equals the request_id supplied to POST /api/run.
+            Exact flow ID of the target workflow. Format: "research:{request_id}".
             Must match the flow_id emitted in the awaiting_approval chunk exactly.
-          example: "abc123"
+          example: "research:abc123"
           minLength: 1
         approved:
           type: boolean
@@ -308,11 +308,11 @@ components:
         message:
           type: string
           description: Confirmation that the signal was accepted.
-          example: "Approval signal accepted for flow abc123."
+          example: "Approval signal accepted for flow research:abc123."
         flow_id:
           type: string
           description: Echo of the targeted flow_id.
-          example: "abc123"
+          example: "research:abc123"
 
     ResearchChunk:
       type: object
@@ -332,8 +332,8 @@ components:
       properties:
         flow_id:
           type: string
-          description: Immutable workflow identity. Equals the raw request_id supplied at pipeline start.
-          example: "abc123"
+          description: Immutable workflow identity. Format "research:{request_id}".
+          example: "research:abc123"
         sequence:
           type: integer
           description: >
