@@ -475,7 +475,7 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
             abstract=abstract,
             gemini_api_key=gemini_api_key,
         )
-    except Exception as exc:
+    except BaseException as exc:
         yield _error_chunk("structural_decomposition", exc)
         return
 
@@ -514,7 +514,7 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
             decomposition=decomposition,
             gemini_api_key=gemini_api_key,
         )
-    except Exception as exc:
+    except BaseException as exc:
         yield _error_chunk("evidence_extraction", exc)
         return
 
@@ -553,7 +553,7 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
             evidence=evidence,
             gemini_api_key=gemini_api_key,
         )
-    except Exception as exc:
+    except BaseException as exc:
         yield _error_chunk("risk_analysis", exc)
         return
 
@@ -592,7 +592,7 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
             risk=risk,
             gemini_api_key=gemini_api_key,
         )
-    except Exception as exc:
+    except BaseException as exc:
         yield _error_chunk("comparative_context_generation", exc)
         return
 
@@ -634,7 +634,7 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
             context=context,
             gemini_api_key=gemini_api_key,
         )
-    except Exception as exc:
+    except BaseException as exc:
         yield _error_chunk("executive_summary_synthesis", exc)
         return
 
@@ -788,7 +788,7 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
                 critique=critique,
                 gemini_api_key=gemini_api_key,
             )
-        except Exception as exc:
+        except BaseException as exc:
             yield _error_chunk("refined_executive_summary_synthesis", exc)
             return
 
