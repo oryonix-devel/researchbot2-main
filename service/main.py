@@ -19,8 +19,7 @@ All @fc.compute and @fc.flow calls use keyword arguments exclusively.
 
 import datetime
 import json
-import urllib.error
-import urllib.request
+import requests
 
 import fc
 
@@ -40,7 +39,7 @@ _approval_registry: dict = {}
 # ---------------------------------------------------------------------------
 _GEMINI_ENDPOINT = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
-    "gemini-1.5-pro:generateContent"
+    "gemini-3-flash-preview:generateContent"
 )
 _GEMINI_MODEL_LABEL = "gemini"
 
@@ -81,19 +80,10 @@ def _build_chunk(
 
 
 def _gemini_generate(gemini_api_key: str, prompt: str) -> str:
-    """
-    Perform a synchronous, fully-buffered HTTP POST to the Gemini
-    generateContent endpoint.
-
-    Design choices:
-    - Uses stdlib urllib only (no external packages; WASM-safe).
-    - Raises on any HTTP error or unexpected response shape.
-      Exceptions propagate to the Temporal activity runtime, which retries
-      according to platform-configured retry policy.
-    - Fully buffers the response body before returning.
-    - Does not stream tokens.
-    """
-    url = f"{_GEMINI_ENDPOINT}?key={gemini_api_key}"
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": gemini_api_key,
+    }
     payload = {
         "contents": [
             {
@@ -107,29 +97,20 @@ def _gemini_generate(gemini_api_key: str, prompt: str) -> str:
             "topP": 0.9,
         },
     }
-    body_bytes = json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(
-        url=url,
-        data=body_bytes,
-        headers={"Content-Type": "application/json"},
-        method="POST",
+    response = requests.post(
+        _GEMINI_ENDPOINT,
+        json=payload,
+        headers=headers,
     )
-    # urllib.request.urlopen raises urllib.error.HTTPError on 4xx/5xx,
-    # propagating naturally to the Temporal activity for retry.
-    with urllib.request.urlopen(request) as response:
-        raw = response.read().decode("utf-8")
-
-    parsed = json.loads(raw)
-
-    # Validate expected response shape; raise on unexpected structure so
-    # Temporal can retry rather than returning corrupted data silently.
+    response.raise_for_status()
+    parsed = response.json()
     try:
         text: str = parsed["candidates"][0]["content"]["parts"][0]["text"]
     except (KeyError, IndexError, TypeError) as exc:
         raise RuntimeError(
-            f"Unexpected Gemini response structure: {exc!r}. Raw: {raw[:500]}"
+            f"Unexpected Gemini response structure: {exc!r}. "
+            f"Raw: {response.text[:500]}"
         ) from exc
-
     return text
 
 
