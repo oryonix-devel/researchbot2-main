@@ -1688,6 +1688,28 @@ function processChunk(chunk) {
         $('sidebarLiveLabel').textContent = 'Streaming chunks…';
       }
       break;
+
+    // ---- Pipeline error — surfaced from @fc.compute exception ----
+    // Emitted by the flow when a compute activity exhausts Temporal retries.
+    // artifact: { message, failed_stage }
+    // The stream closes cleanly after this chunk (generator returns → STREAM_COMPLETED).
+    // consumeStream exits immediately after processChunk returns for this stage
+    // so STREAM_COMPLETED never triggers showCompletedView().
+    case 'pipeline_error': {
+      const errMsg = (artifact && artifact.message) || 'An unknown pipeline error occurred.';
+      const failedStage = (artifact && artifact.failed_stage) || stage;
+      setStatus('dot-ruby', 'Pipeline error');
+      showErr('inputError',
+        `Pipeline error at stage "${failedStage}": ${errMsg}\n\n` +
+        `If the error references a network or connection failure, the compute ` +
+        `sandbox cannot reach the Gemini API endpoint — check outbound HTTPS ` +
+        `access from your Oryonix dev environment and verify your API key.`
+      );
+      $('btnRun').disabled = false;
+      $('btnRunLabel').textContent = 'Run Pipeline';
+      showView('input');
+      break;
+    }
   }
 }
 
@@ -1814,6 +1836,14 @@ async function consumeStream(resp) {
         // and the generator returned. Don't wait for stream close.
         if (chunk.stage === 'pipeline_complete') {
           showCompletedView();
+          return;
+        }
+
+        // Error terminal: pipeline_error means the flow errored and returned.
+        // processChunk already showed the error and navigated to input view.
+        // Exit the read loop immediately so the STREAM_COMPLETED sentinel
+        // that follows does NOT trigger showCompletedView().
+        if (chunk.stage === 'pipeline_error') {
           return;
         }
       }

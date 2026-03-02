@@ -420,6 +420,27 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
             artifact=artifact,
         )
 
+    def _error_chunk(failed_stage: str, exc: Exception) -> dict:
+        """
+        Emit a pipeline_error chunk when a @fc.compute activity raises after
+        exhausting Temporal retries. Surfaces the raw exception string in the
+        SSE stream so the client can display it instead of a silent stream close.
+        """
+        return _build_chunk(
+            flow_id=flow_id,
+            sequence=_next_seq(),
+            stage="pipeline_error",
+            status="error",
+            attempt=attempt,
+            artifact={
+                "message": (
+                    f"Pipeline failed at stage '{failed_stage}' after retries. "
+                    f"Error: {exc!r}"
+                ),
+                "failed_stage": failed_stage,
+            },
+        )
+
     # ==================================================================
     # PIPELINE START
     # ==================================================================
@@ -449,10 +470,14 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
         artifact={"message": "Dispatching structural decomposition to Gemini."},
     )
 
-    decomposition: str = structural_decomposition(
-        abstract=abstract,
-        gemini_api_key=gemini_api_key,
-    )
+    try:
+        decomposition: str = structural_decomposition(
+            abstract=abstract,
+            gemini_api_key=gemini_api_key,
+        )
+    except Exception as exc:
+        yield _error_chunk("structural_decomposition", exc)
+        return
 
     yield _chunk(
         stage="structural_decomposition",
@@ -483,11 +508,15 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
         artifact={"message": "Dispatching evidence extraction to Gemini."},
     )
 
-    evidence: str = evidence_extraction(
-        abstract=abstract,
-        decomposition=decomposition,
-        gemini_api_key=gemini_api_key,
-    )
+    try:
+        evidence: str = evidence_extraction(
+            abstract=abstract,
+            decomposition=decomposition,
+            gemini_api_key=gemini_api_key,
+        )
+    except Exception as exc:
+        yield _error_chunk("evidence_extraction", exc)
+        return
 
     yield _chunk(
         stage="evidence_extraction",
@@ -518,11 +547,15 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
         artifact={"message": "Dispatching risk analysis to Gemini."},
     )
 
-    risk: str = risk_analysis(
-        abstract=abstract,
-        evidence=evidence,
-        gemini_api_key=gemini_api_key,
-    )
+    try:
+        risk: str = risk_analysis(
+            abstract=abstract,
+            evidence=evidence,
+            gemini_api_key=gemini_api_key,
+        )
+    except Exception as exc:
+        yield _error_chunk("risk_analysis", exc)
+        return
 
     yield _chunk(
         stage="risk_analysis",
@@ -553,11 +586,15 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
         artifact={"message": "Dispatching comparative context generation to Gemini."},
     )
 
-    context: str = comparative_context_generation(
-        abstract=abstract,
-        risk=risk,
-        gemini_api_key=gemini_api_key,
-    )
+    try:
+        context: str = comparative_context_generation(
+            abstract=abstract,
+            risk=risk,
+            gemini_api_key=gemini_api_key,
+        )
+    except Exception as exc:
+        yield _error_chunk("comparative_context_generation", exc)
+        return
 
     yield _chunk(
         stage="comparative_context_generation",
@@ -588,14 +625,18 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
         artifact={"message": "Dispatching executive summary synthesis to Gemini."},
     )
 
-    summary: str = executive_summary_synthesis(
-        abstract=abstract,
-        decomposition=decomposition,
-        evidence=evidence,
-        risk=risk,
-        context=context,
-        gemini_api_key=gemini_api_key,
-    )
+    try:
+        summary: str = executive_summary_synthesis(
+            abstract=abstract,
+            decomposition=decomposition,
+            evidence=evidence,
+            risk=risk,
+            context=context,
+            gemini_api_key=gemini_api_key,
+        )
+    except Exception as exc:
+        yield _error_chunk("executive_summary_synthesis", exc)
+        return
 
     yield _chunk(
         stage="executive_summary_synthesis",
@@ -740,12 +781,16 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
         )
 
         # Refinement compute: abstract + last summary + critique ONLY (§12).
-        summary = refined_executive_summary_synthesis(
-            abstract=abstract,
-            last_summary=summary,
-            critique=critique,
-            gemini_api_key=gemini_api_key,
-        )
+        try:
+            summary = refined_executive_summary_synthesis(
+                abstract=abstract,
+                last_summary=summary,
+                critique=critique,
+                gemini_api_key=gemini_api_key,
+            )
+        except Exception as exc:
+            yield _error_chunk("refined_executive_summary_synthesis", exc)
+            return
 
         yield _chunk(
             stage="refined_executive_summary_synthesis",

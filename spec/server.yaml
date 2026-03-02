@@ -355,6 +355,7 @@ components:
             - refinement_started
             - refined_executive_summary_synthesis
             - pipeline_complete
+            - pipeline_error
           example: "evidence_extraction"
         status:
           type: string
@@ -367,6 +368,7 @@ components:
             - pending
             - approved
             - rejected
+            - error
           example: "processing"
         attempt:
           type: integer
