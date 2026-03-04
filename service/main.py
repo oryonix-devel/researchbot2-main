@@ -40,10 +40,9 @@ _approval_registry: dict = {}
 # ---------------------------------------------------------------------------
 _GEMINI_ENDPOINT = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
-    "gemini-1.5-pro:generateContent"
+    "gemini-3-flash-preview:generateContent"
 )
-_GEMINI_MODEL_LABEL = "gemini"
-
+_GEMINI_MODEL_LABEL = "gemini-3-flash"
 
 # ---------------------------------------------------------------------------
 # Internal helpers (not fc primitives — pure deterministic utilities)
@@ -82,23 +81,18 @@ def _build_chunk(
 
 def _gemini_generate(gemini_api_key: str, prompt: str) -> str:
     """
-    Perform a synchronous, fully-buffered HTTP POST to the Gemini
-    generateContent endpoint.
+    Gemini-3 Flash synchronous request.
 
-    Design choices:
-    - Uses stdlib urllib only (no external packages; WASM-safe).
-    - Raises on any HTTP error or unexpected response shape.
-      Exceptions propagate to the Temporal activity runtime, which retries
-      according to platform-configured retry policy.
-    - Fully buffers the response body before returning.
-    - Does not stream tokens.
+    Design preserved:
+    - stdlib urllib only (WASM safe)
+    - fully buffered
+    - raises on HTTP or schema error
     """
-    url = f"{_GEMINI_ENDPOINT}?key={gemini_api_key}"
+
     payload = {
         "contents": [
             {
-                "role": "user",
-                "parts": [{"text": prompt}],
+                "parts": [{"text": prompt}]
             }
         ],
         "generationConfig": {
@@ -107,22 +101,24 @@ def _gemini_generate(gemini_api_key: str, prompt: str) -> str:
             "topP": 0.9,
         },
     }
+
     body_bytes = json.dumps(payload).encode("utf-8")
+
     request = urllib.request.Request(
-        url=url,
+        url=_GEMINI_ENDPOINT,
         data=body_bytes,
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            "x-goog-api-key": gemini_api_key,
+        },
         method="POST",
     )
-    # urllib.request.urlopen raises urllib.error.HTTPError on 4xx/5xx,
-    # propagating naturally to the Temporal activity for retry.
+
     with urllib.request.urlopen(request) as response:
         raw = response.read().decode("utf-8")
 
     parsed = json.loads(raw)
 
-    # Validate expected response shape; raise on unexpected structure so
-    # Temporal can retry rather than returning corrupted data silently.
     try:
         text: str = parsed["candidates"][0]["content"]["parts"][0]["text"]
     except (KeyError, IndexError, TypeError) as exc:
