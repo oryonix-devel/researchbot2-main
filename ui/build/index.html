@@ -1338,8 +1338,9 @@
 'use strict';
 
 // ---- Config ----
-// POLL_MS removed — the UI no longer polls GET /api/stream.
-// Chunks are consumed directly from the POST /api/run SSE response body.
+// The UI does NOT poll GET /api/stream.
+// Chunks are consumed directly from the POST /api/run NDJSON response body
+// (application/x-ndjson — one JSON object per \n-delimited line, no SSE wrapping).
 const STAGE_DEFS   = [
   { key: 'structural_decomposition',       num: '01', label: 'Structural Decomposition',    short: 'Structure' },
   { key: 'evidence_extraction',            num: '02', label: 'Evidence Extraction',         short: 'Evidence'  },
@@ -1831,19 +1832,24 @@ function showCompletedView() {
   showView('completed');
 }
 
-// ---- SSE stream consumer ----
+// ---- NDJSON stream consumer ----
 // Reads chunks directly from the POST /api/run response body.
-// The Oryonix platform streams SSE events from the POST endpoint itself —
+// server.yaml declares the response as application/x-ndjson:
+//   "Each line is a JSON object conforming to ResearchChunk."
+// The platform streams one JSON object per \n-delimited line (NDJSON) —
+// there are NO SSE event wrappers, NO "data:" prefixes, and NO \n\n delimiters.
+//
 // GET /api/stream is a separate reconnection/replay mechanism that requires
 // a working Temporal workflow lookup by ID, which is not reliable in this env.
 // Consuming the POST response body directly is the correct primary approach:
 // the stream stays open through the approval gate pause and resumes automatically
 // when POST /api/approval fires the signal.
 //
-// SSE wire format from the platform:
-//   event:message\ndata:{json}\n\n
+// NDJSON wire format from the platform:
+//   {"flow_id":"research:abc123","sequence":1,...}\n
+//   {"flow_id":"research:abc123","sequence":2,...}\n
 //   ...
-//   event:message\ndata:STREAM_COMPLETED\n\n  (or stream closes)
+//   STREAM_COMPLETED\n  (or stream closes cleanly)
 async function consumeStream(resp) {
   const reader = resp.body.getReader();
   S.streamReader = reader;           // stored so resetAll() can cancel it
@@ -1876,32 +1882,27 @@ async function consumeStream(resp) {
 
       buffer += decoder.decode(value, { stream: true });
 
-      // SSE events are delimited by a blank line (\n\n).
-      // Split on \n\n; keep the trailing incomplete fragment in buffer.
-      const events = buffer.split('\n\n');
-      buffer = events.pop(); // last element may be incomplete
+      // NDJSON: the platform streams one JSON object per \n-delimited line.
+      // Split on single \n; keep the trailing incomplete fragment in buffer.
+      // There are NO "data:" prefixes and NO \n\n double-newline delimiters —
+      // those belong to SSE format, which this platform does not use.
+      const lines = buffer.split('\n');
+      buffer = lines.pop(); // last element may be incomplete
 
-      for (const event of events) {
-        if (!event.trim()) continue;
-
-        // Extract the data: line from the event block.
-        // An event may have an event: line before data: — we ignore it.
-        const dataLine = event.split('\n').find(l => l.startsWith('data:'));
-        if (!dataLine) continue;
-
-        const dataStr = dataLine.slice(5).trim(); // strip 'data:' prefix
+      for (const line of lines) {
+        if (!line.trim()) continue;
 
         // STREAM_COMPLETED sentinel — platform signals no more chunks.
-        if (dataStr === 'STREAM_COMPLETED' || dataStr === '"STREAM_COMPLETED"') {
+        if (line === 'STREAM_COMPLETED' || line === '"STREAM_COMPLETED"') {
           showCompletedView();
           return;
         }
 
         let chunk;
         try {
-          chunk = JSON.parse(dataStr);
+          chunk = JSON.parse(line);
         } catch (e) {
-          console.warn('ResearchBot: failed to parse SSE data line:', dataStr, e);
+          console.warn('ResearchBot: failed to parse NDJSON line:', line, e);
           continue;
         }
 

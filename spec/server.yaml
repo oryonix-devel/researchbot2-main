@@ -258,7 +258,7 @@ components:
             Client-supplied globally unique identifier for this research evaluation run.
             Used to construct the immutable flow ID: "research:{request_id}".
             Must be present; no auto-generation fallback exists.
-          example: "research:abc123"
+          example: "abc123"
           minLength: 1
         abstract:
           type: string
