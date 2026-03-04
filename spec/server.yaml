@@ -352,6 +352,7 @@ components:
             - comparative_context_generation
             - executive_summary_synthesis
             - awaiting_approval
+            - approval_received
             - refinement_started
             - refined_executive_summary_synthesis
             - pipeline_complete
