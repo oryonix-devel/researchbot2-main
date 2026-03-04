@@ -45,6 +45,42 @@ _GEMINI_ENDPOINT = (
 _GEMINI_MODEL_LABEL = "gemini"
 
 # ---------------------------------------------------------------------------
+# Compute error contract
+#
+# Context: the Oryonix compute worker has a known bug (unfixed in master) where
+# any exception that escapes a @fc.compute WASM boundary is incorrectly reported
+# to Temporal as ActivityExecutionResult(Cancellation(...)) rather than
+# ActivityExecutionResult(Failure(...)).  Temporal then rejects the completion
+# with "unable to mark activity as canceled without activity being request
+# canceled first" because no cancellation was requested — it was a plain
+# failure.  This kills the workflow entirely.
+#
+# Workaround: exceptions must never escape @fc.compute functions.  Instead,
+# each compute catches Exception internally, encodes the error as a prefixed
+# return string, and returns normally.  The flow inspects every result with
+# _is_compute_error() and, on a positive match, yields a pipeline_error chunk
+# and returns — cleanly terminating the generator from within the flow worker,
+# which handles failure correctly.
+#
+# We catch Exception (not BaseException) so that platform-level signals
+# (SystemExit, KeyboardInterrupt) — which the WASM runtime may use to
+# forcefully terminate a compute task — are never intercepted.  All real
+# application errors (HTTP, JSON, value, connection) are Exception subclasses.
+# ---------------------------------------------------------------------------
+_COMPUTE_ERROR_PREFIX = "__COMPUTE_ERROR__:"
+
+
+def _is_compute_error(result: str) -> bool:
+    """Return True if the compute function encoded a failure into its return value."""
+    return isinstance(result, str) and result.startswith(_COMPUTE_ERROR_PREFIX)
+
+
+def _extract_compute_error(result: str) -> str:
+    """Strip the prefix and return the raw error repr string."""
+    return result[len(_COMPUTE_ERROR_PREFIX):]
+
+
+# ---------------------------------------------------------------------------
 # Internal helpers (not fc primitives — pure deterministic utilities)
 # ---------------------------------------------------------------------------
 
@@ -172,7 +208,10 @@ def structural_decomposition(abstract: str, gemini_api_key: str) -> str:
         "scope, limitations.\n\n"
         f"Abstract:\n{abstract}"
     )
-    return _gemini_generate(gemini_api_key=gemini_api_key, prompt=prompt)
+    try:
+        return _gemini_generate(gemini_api_key=gemini_api_key, prompt=prompt)
+    except Exception as exc:
+        return f"{_COMPUTE_ERROR_PREFIX}{exc!r}"
 
 
 @fc.compute
@@ -200,7 +239,10 @@ def evidence_extraction(
         f"Abstract:\n{abstract}\n\n"
         f"Structural Decomposition:\n{decomposition}"
     )
-    return _gemini_generate(gemini_api_key=gemini_api_key, prompt=prompt)
+    try:
+        return _gemini_generate(gemini_api_key=gemini_api_key, prompt=prompt)
+    except Exception as exc:
+        return f"{_COMPUTE_ERROR_PREFIX}{exc!r}"
 
 
 @fc.compute
@@ -229,7 +271,10 @@ def risk_analysis(
         f"Abstract:\n{abstract}\n\n"
         f"Extracted Evidence:\n{evidence}"
     )
-    return _gemini_generate(gemini_api_key=gemini_api_key, prompt=prompt)
+    try:
+        return _gemini_generate(gemini_api_key=gemini_api_key, prompt=prompt)
+    except Exception as exc:
+        return f"{_COMPUTE_ERROR_PREFIX}{exc!r}"
 
 
 @fc.compute
@@ -256,7 +301,10 @@ def comparative_context_generation(
         f"Abstract:\n{abstract}\n\n"
         f"Risk Profile:\n{risk}"
     )
-    return _gemini_generate(gemini_api_key=gemini_api_key, prompt=prompt)
+    try:
+        return _gemini_generate(gemini_api_key=gemini_api_key, prompt=prompt)
+    except Exception as exc:
+        return f"{_COMPUTE_ERROR_PREFIX}{exc!r}"
 
 
 @fc.compute
@@ -290,7 +338,10 @@ def executive_summary_synthesis(
         f"Risk Analysis:\n{risk}\n\n"
         f"Comparative Context:\n{context}"
     )
-    return _gemini_generate(gemini_api_key=gemini_api_key, prompt=prompt)
+    try:
+        return _gemini_generate(gemini_api_key=gemini_api_key, prompt=prompt)
+    except Exception as exc:
+        return f"{_COMPUTE_ERROR_PREFIX}{exc!r}"
 
 
 @fc.compute
@@ -326,7 +377,10 @@ def refined_executive_summary_synthesis(
         f"Previous Executive Summary:\n{last_summary}\n\n"
         f"Human Critique:\n{critique}"
     )
-    return _gemini_generate(gemini_api_key=gemini_api_key, prompt=prompt)
+    try:
+        return _gemini_generate(gemini_api_key=gemini_api_key, prompt=prompt)
+    except Exception as exc:
+        return f"{_COMPUTE_ERROR_PREFIX}{exc!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -430,11 +484,12 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
             artifact=artifact,
         )
 
-    def _error_chunk(failed_stage: str, exc: Exception) -> dict:
+    def _error_chunk(failed_stage: str, error_msg: str) -> dict:
         """
-        Emit a pipeline_error chunk when a @fc.compute activity raises after
-        exhausting Temporal retries. Surfaces the raw exception string in the
-        SSE stream so the client can display it instead of a silent stream close.
+        Emit a pipeline_error chunk when a @fc.compute activity returns an
+        encoded error string (see _COMPUTE_ERROR_PREFIX / _is_compute_error).
+        The error is surfaced in the NDJSON stream so the client can display it
+        instead of a silent stream close.
         """
         return _build_chunk(
             flow_id=flow_id,
@@ -444,8 +499,8 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
             attempt=attempt,
             artifact={
                 "message": (
-                    f"Pipeline failed at stage '{failed_stage}' after retries. "
-                    f"Error: {exc!r}"
+                    f"Pipeline failed at stage '{failed_stage}'. "
+                    f"Error: {error_msg}"
                 ),
                 "failed_stage": failed_stage,
             },
@@ -480,13 +535,12 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
         artifact={"message": "Dispatching structural decomposition to Gemini."},
     )
 
-    try:
-        decomposition: str = structural_decomposition(
-            abstract=abstract,
-            gemini_api_key=gemini_api_key,
-        )
-    except BaseException as exc:
-        yield _error_chunk("structural_decomposition", exc)
+    decomposition: str = structural_decomposition(
+        abstract=abstract,
+        gemini_api_key=gemini_api_key,
+    )
+    if _is_compute_error(decomposition):
+        yield _error_chunk("structural_decomposition", _extract_compute_error(decomposition))
         return
 
     yield _chunk(
@@ -518,14 +572,13 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
         artifact={"message": "Dispatching evidence extraction to Gemini."},
     )
 
-    try:
-        evidence: str = evidence_extraction(
-            abstract=abstract,
-            decomposition=decomposition,
-            gemini_api_key=gemini_api_key,
-        )
-    except BaseException as exc:
-        yield _error_chunk("evidence_extraction", exc)
+    evidence: str = evidence_extraction(
+        abstract=abstract,
+        decomposition=decomposition,
+        gemini_api_key=gemini_api_key,
+    )
+    if _is_compute_error(evidence):
+        yield _error_chunk("evidence_extraction", _extract_compute_error(evidence))
         return
 
     yield _chunk(
@@ -557,14 +610,13 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
         artifact={"message": "Dispatching risk analysis to Gemini."},
     )
 
-    try:
-        risk: str = risk_analysis(
-            abstract=abstract,
-            evidence=evidence,
-            gemini_api_key=gemini_api_key,
-        )
-    except BaseException as exc:
-        yield _error_chunk("risk_analysis", exc)
+    risk: str = risk_analysis(
+        abstract=abstract,
+        evidence=evidence,
+        gemini_api_key=gemini_api_key,
+    )
+    if _is_compute_error(risk):
+        yield _error_chunk("risk_analysis", _extract_compute_error(risk))
         return
 
     yield _chunk(
@@ -596,14 +648,13 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
         artifact={"message": "Dispatching comparative context generation to Gemini."},
     )
 
-    try:
-        context: str = comparative_context_generation(
-            abstract=abstract,
-            risk=risk,
-            gemini_api_key=gemini_api_key,
-        )
-    except BaseException as exc:
-        yield _error_chunk("comparative_context_generation", exc)
+    context: str = comparative_context_generation(
+        abstract=abstract,
+        risk=risk,
+        gemini_api_key=gemini_api_key,
+    )
+    if _is_compute_error(context):
+        yield _error_chunk("comparative_context_generation", _extract_compute_error(context))
         return
 
     yield _chunk(
@@ -635,17 +686,16 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
         artifact={"message": "Dispatching executive summary synthesis to Gemini."},
     )
 
-    try:
-        summary: str = executive_summary_synthesis(
-            abstract=abstract,
-            decomposition=decomposition,
-            evidence=evidence,
-            risk=risk,
-            context=context,
-            gemini_api_key=gemini_api_key,
-        )
-    except BaseException as exc:
-        yield _error_chunk("executive_summary_synthesis", exc)
+    summary: str = executive_summary_synthesis(
+        abstract=abstract,
+        decomposition=decomposition,
+        evidence=evidence,
+        risk=risk,
+        context=context,
+        gemini_api_key=gemini_api_key,
+    )
+    if _is_compute_error(summary):
+        yield _error_chunk("executive_summary_synthesis", _extract_compute_error(summary))
         return
 
     yield _chunk(
@@ -791,15 +841,14 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
         )
 
         # Refinement compute: abstract + last summary + critique ONLY (§12).
-        try:
-            summary = refined_executive_summary_synthesis(
-                abstract=abstract,
-                last_summary=summary,
-                critique=critique,
-                gemini_api_key=gemini_api_key,
-            )
-        except BaseException as exc:
-            yield _error_chunk("refined_executive_summary_synthesis", exc)
+        summary = refined_executive_summary_synthesis(
+            abstract=abstract,
+            last_summary=summary,
+            critique=critique,
+            gemini_api_key=gemini_api_key,
+        )
+        if _is_compute_error(summary):
+            yield _error_chunk("refined_executive_summary_synthesis", _extract_compute_error(summary))
             return
 
         yield _chunk(
