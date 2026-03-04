@@ -42,7 +42,7 @@ _GEMINI_ENDPOINT = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
     "gemini-3-flash-preview:generateContent"
 )
-_GEMINI_MODEL_LABEL = "gemini-3-flash"
+_GEMINI_MODEL_LABEL = "gemini"
 
 # ---------------------------------------------------------------------------
 # Internal helpers (not fc primitives — pure deterministic utilities)
@@ -125,6 +125,20 @@ def _gemini_generate(gemini_api_key: str, prompt: str) -> str:
         raise RuntimeError(
             f"Unexpected Gemini response structure: {exc!r}. Raw: {raw[:500]}"
         ) from exc
+
+    # Gemini often wraps JSON responses in markdown code fences
+    # (e.g. ```json\n{...}\n```).  Strip them so downstream code and the UI
+    # always receive clean text.  We handle both ```json and plain ``` fences.
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        # Remove the opening fence line (```json, ```JSON, or just ```)
+        first_newline = stripped.find("\n")
+        if first_newline != -1:
+            stripped = stripped[first_newline + 1:]
+        # Remove the closing fence if present
+        if stripped.rstrip().endswith("```"):
+            stripped = stripped.rstrip()[:-3].rstrip()
+        text = stripped
 
     return text
 

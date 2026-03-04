@@ -1529,7 +1529,7 @@ function setCardState(key, state, text) {
   }
 
   if (text && output) {
-    output.textContent = text;
+    output.innerHTML = renderArtifact(text);
     S.artifacts[key]   = text;
   }
 
@@ -1560,7 +1560,7 @@ function makeAccordion(title, text) {
     </div>
     <div class="accord-body">
       <div class="accord-content">
-        <div class="prose">${escHtml(text)}</div>
+        <div class="prose">${renderArtifact(text)}</div>
       </div>
     </div>`;
   return wrap;
@@ -1570,7 +1570,94 @@ function escHtml(str) {
   return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
-// ---- Chunk processor ----
+// ---- Artifact renderer ----
+// Gemini returns JSON for every stage.  Parse it and render it as structured
+// HTML so the user sees a readable breakdown rather than a raw JSON blob.
+// Falls back to pre-wrap plain text if parsing fails.
+function renderArtifact(text) {
+  if (!text) return '<em style="color:var(--dust)">No output.</em>';
+
+  let obj;
+  try {
+    obj = JSON.parse(text);
+  } catch (_) {
+    // Not JSON — render as plain pre-wrap text
+    return `<div class="prose">${escHtml(text)}</div>`;
+  }
+
+  if (typeof obj !== 'object' || obj === null) {
+    return `<div class="prose">${escHtml(String(obj))}</div>`;
+  }
+
+  // Render each top-level key as a labelled section
+  let html = '';
+  for (const [key, val] of Object.entries(obj)) {
+    const label = key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+    html += `<div style="margin-bottom:16px;">`;
+    html += `<div style="font-family:var(--mono);font-size:10px;font-weight:600;`
+          + `letter-spacing:0.1em;text-transform:uppercase;color:var(--amber);`
+          + `margin-bottom:6px;">${escHtml(label)}</div>`;
+
+    if (Array.isArray(val)) {
+      if (val.length === 0) {
+        html += `<div class="prose" style="color:var(--dust)">—</div>`;
+      } else if (typeof val[0] === 'object' && val[0] !== null) {
+        // Array of objects (e.g. evidence_claims, risk items)
+        val.forEach((item, i) => {
+          html += `<div style="background:var(--ink-3);border:1px solid var(--rule-dim);`
+                + `border-radius:var(--r);padding:10px 14px;margin-bottom:8px;">`;
+          html += `<div style="font-family:var(--mono);font-size:9px;color:var(--dust);`
+                + `margin-bottom:6px;">ITEM ${i + 1}</div>`;
+          for (const [k2, v2] of Object.entries(item)) {
+            const lbl2 = k2.replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase());
+            html += `<div style="margin-bottom:4px;">`
+                  + `<span style="font-family:var(--mono);font-size:10px;color:var(--muted);">${escHtml(lbl2)}: </span>`
+                  + `<span class="prose" style="display:inline;">${escHtml(String(v2))}</span>`
+                  + `</div>`;
+          }
+          html += `</div>`;
+        });
+      } else {
+        // Array of primitives (e.g. key_findings, conditions)
+        html += `<ul style="margin:0;padding-left:18px;list-style:disc;">`;
+        val.forEach(item => {
+          html += `<li class="prose" style="margin-bottom:4px;">${escHtml(String(item))}</li>`;
+        });
+        html += `</ul>`;
+      }
+    } else if (typeof val === 'object' && val !== null) {
+      // Nested object (e.g. risk_profile with sub-objects per risk)
+      for (const [k2, v2] of Object.entries(val)) {
+        const lbl2 = k2.replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase());
+        html += `<div style="background:var(--ink-3);border:1px solid var(--rule-dim);`
+              + `border-radius:var(--r);padding:10px 14px;margin-bottom:8px;">`;
+        html += `<div style="font-family:var(--mono);font-size:10px;font-weight:600;`
+              + `color:var(--body);margin-bottom:6px;">${escHtml(lbl2)}</div>`;
+        if (typeof v2 === 'object' && v2 !== null) {
+          for (const [k3, v3] of Object.entries(v2)) {
+            const lbl3 = k3.replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase());
+            html += `<div style="margin-bottom:4px;">`
+                  + `<span style="font-family:var(--mono);font-size:10px;color:var(--muted);">${escHtml(lbl3)}: </span>`
+                  + `<span class="prose" style="display:inline;">${escHtml(String(v3))}</span>`
+                  + `</div>`;
+          }
+        } else {
+          html += `<span class="prose">${escHtml(String(v2))}</span>`;
+        }
+        html += `</div>`;
+      }
+    } else {
+      // Primitive (string, number, boolean)
+      html += `<div class="prose">${escHtml(String(val))}</div>`;
+    }
+
+    html += `</div>`;
+  }
+
+  return html;
+}
+
+
 function processChunk(chunk) {
   const { stage, status, attempt, artifact } = chunk;
   S.chunkCount++;
@@ -1715,7 +1802,7 @@ function processChunk(chunk) {
 
 // ---- Show approval view ----
 function showApprovalView() {
-  $('approvalExecText').textContent = S.execSummary || 'Executive summary not found.';
+  $('approvalExecText').innerHTML = renderArtifact(S.execSummary) || 'Executive summary not found.';
   $('approvalAttemptNum').textContent = S.attempt;
   $('approvalAttemptLabel').textContent = S.attempt;
   $('approvalFlowId').textContent = S.flowId;
@@ -1728,7 +1815,7 @@ function showApprovalView() {
 // ---- Show completed view ----
 function showCompletedView() {
   const summary = S.artifacts['executive_summary_synthesis'] || S.execSummary;
-  $('finalExecText').textContent = summary;
+  $('finalExecText').innerHTML = renderArtifact(summary);
   $('completedFlowChip').textContent = S.flowId;
   $('completedAttemptsChip').textContent = `Attempts: ${S.totalAttempts}`;
 
