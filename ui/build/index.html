@@ -1338,9 +1338,9 @@
 'use strict';
 
 // ---- Config ----
-// The UI does NOT poll GET /api/stream.
-// Chunks are consumed directly from the POST /api/run NDJSON response body
-// (application/x-ndjson — one JSON object per \n-delimited line, no SSE wrapping).
+// Chunks are consumed by polling GET /api/stream every 1.5s.
+// The POST /api/run response body is discarded — the gateway buffers it until
+// flow completion and never delivers chunks in real-time for suspended flows.
 const STAGE_DEFS   = [
   { key: 'structural_decomposition',       num: '01', label: 'Structural Decomposition',    short: 'Structure' },
   { key: 'evidence_extraction',            num: '02', label: 'Evidence Extraction',         short: 'Evidence'  },
@@ -1692,7 +1692,7 @@ function processChunk(chunk) {
         S.execSummary = artifact.final_summary;
       }
       // showCompletedView() is called immediately after processChunk returns
-      // in the consumeStream event loop — see the check below.
+      // in the pollStream loop — see the check below.
       break;
 
     // ---- Refinement ----
@@ -1780,7 +1780,6 @@ function processChunk(chunk) {
     // ---- Pipeline error — surfaced from @fc.compute exception ----
     // Emitted by the flow when a compute activity exhausts Temporal retries.
     // artifact: { message, failed_stage }
-    // The stream closes cleanly after this chunk (generator returns → STREAM_COMPLETED).
     // consumeStream exits immediately after processChunk returns for this stage
     // so STREAM_COMPLETED never triggers showCompletedView().
     case 'pipeline_error': {
@@ -1832,123 +1831,109 @@ function showCompletedView() {
   showView('completed');
 }
 
-// ---- NDJSON stream consumer ----
-// Reads chunks directly from the POST /api/run response body.
-// server.yaml declares the response as application/x-ndjson:
-//   "Each line is a JSON object conforming to ResearchChunk."
-// The platform streams one JSON object per \n-delimited line (NDJSON) —
-// there are NO SSE event wrappers, NO "data:" prefixes, and NO \n\n delimiters.
+// ---- GET /api/stream polling consumer ----
 //
-// GET /api/stream is a separate reconnection/replay mechanism that requires
-// a working Temporal workflow lookup by ID, which is not reliable in this env.
-// Consuming the POST response body directly is the correct primary approach:
-// the stream stays open through the approval gate pause and resumes automatically
-// when POST /api/approval fires the signal.
+// WHY POLLING INSTEAD OF READING THE POST RESPONSE BODY:
 //
-// NDJSON wire format from the platform:
-//   {"flow_id":"research:abc123","sequence":1,...}\n
-//   {"flow_id":"research:abc123","sequence":2,...}\n
-//   ...
-//   STREAM_COMPLETED\n  (or stream closes cleanly)
-async function consumeStream(resp) {
-  const reader = resp.body.getReader();
-  S.streamReader = reader;           // stored so resetAll() can cancel it
-  const decoder = new TextDecoder();
-  let buffer = '';
+// The platform gateway buffers all NDJSON chunks internally and only flushes
+// them to the HTTP response when the flow generator returns. Our flow blocks
+// indefinitely at onix.wait_for_condition() during the human approval gate, so
+// the generator never returns during that window — meaning the POST response
+// body delivers zero bytes for ~80s before the gateway closes the connection.
+// The gateway error "Entry not found after timeout: flow_id=<UUID>" in the
+// server logs confirms this: the gateway polls its streaming DB by Temporal
+// UUID, but chunks are stored there by application flow_id (research:{id}).
+//
+// GET /api/stream is served directly from the platform's streaming DB using
+// the reserved get_stream_chunks operationId. It is indexed by the application
+// flow_id (research:{request_id}) — the same value our chunks use — and works
+// correctly for long-running flows that are suspended at a human gate.
+// Polling at 1500ms gives a responsive UI without hammering the endpoint.
+//
+// main.py and server.yaml are correct and unchanged.
+async function pollStream(flowId) {
+  S.pollAbort = false;
+  let afterSeq = 0;
+  let consecutiveErrors = 0;
+  const MAX_ERRORS = 10;
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
+  while (!S.pollAbort) {
+    await sleep(1500);
+    if (S.pollAbort) return;
 
-      if (done) {
-        // Stream closed. If pipeline_complete or STREAM_COMPLETED had already been
-        // processed, consumeStream would have returned before reaching this point.
-        // Therefore arriving here always means the stream closed prematurely — the
-        // pipeline did NOT complete cleanly. Show a diagnostic error and let the
-        // user retry rather than rendering a fake empty "Pipeline Complete" screen.
-        const hint = S.lastSeq
-          ? `Stream closed after seq ${S.lastSeq} (${S.chunkCount} chunk(s) received).`
-          : 'Stream closed before any chunks were received.';
-        showErr('inputError',
-          `Pipeline stream ended unexpectedly. ${hint} ` +
-          `Check your Gemini API key, verify your quota, and try again.`
-        );
-        setStatus('dot-ruby', 'Stream error');
+    let data;
+    try {
+      const r = await fetch(
+        `/api/stream?flow_id=${encodeURIComponent(flowId)}&after_sequence=${afterSeq}`
+      );
+      if (!r.ok) {
+        // 404 = flow not yet registered in streaming DB — normal during
+        // the first second or two; keep polling.
+        // 500 = transient platform error; keep polling.
+        consecutiveErrors++;
+        if (consecutiveErrors >= MAX_ERRORS) {
+          showErr('inputError',
+            `Stream polling failed ${MAX_ERRORS} times in a row (HTTP ${r.status}). ` +
+            `Check your Gemini API key, verify your quota, and try again.`
+          );
+          setStatus('dot-ruby', 'Poll error');
+          $('btnRun').disabled = false;
+          $('btnRunLabel').textContent = 'Run Pipeline';
+          showView('input');
+          return;
+        }
+        continue;
+      }
+      consecutiveErrors = 0;
+      data = await r.json();
+    } catch (e) {
+      if (S.pollAbort) return;
+      consecutiveErrors++;
+      if (consecutiveErrors >= MAX_ERRORS) {
+        console.error('ResearchBot: pollStream fetch error:', e);
+        showErr('inputError', `Stream poll error: ${e.message}`);
+        setStatus('dot-ruby', 'Poll error');
         $('btnRun').disabled = false;
         $('btnRunLabel').textContent = 'Run Pipeline';
         showView('input');
         return;
       }
+      continue;
+    }
 
-      buffer += decoder.decode(value, { stream: true });
+    for (const chunk of (data.chunks || [])) {
+      // On first chunk, confirm flow_id (should equal provisionalFlowId).
+      if (!S.flowId && chunk.flow_id) {
+        S.flowId = chunk.flow_id;
+        $('topbarFlowId').textContent  = S.flowId;
+        $('sidebarFlowId').textContent = S.flowId;
+      }
 
-      // NDJSON: the platform streams one JSON object per \n-delimited line.
-      // Split on single \n; keep the trailing incomplete fragment in buffer.
-      // There are NO "data:" prefixes and NO \n\n double-newline delimiters —
-      // those belong to SSE format, which this platform does not use.
-      const lines = buffer.split('\n');
-      buffer = lines.pop(); // last element may be incomplete
+      if (chunk.sequence > S.lastSeq) S.lastSeq = chunk.sequence;
+      if (chunk.sequence > afterSeq)  afterSeq  = chunk.sequence;
 
-      for (const line of lines) {
-        if (!line.trim()) continue;
+      processChunk(chunk);
 
-        // STREAM_COMPLETED sentinel — platform signals no more chunks.
-        if (line === 'STREAM_COMPLETED' || line === '"STREAM_COMPLETED"') {
-          showCompletedView();
-          return;
-        }
+      if (S.pollAbort) return;
 
-        let chunk;
-        try {
-          chunk = JSON.parse(line);
-        } catch (e) {
-          console.warn('ResearchBot: failed to parse NDJSON line:', line, e);
-          continue;
-        }
-
-        // On the very first chunk, extract flow_id from the payload.
-        // This is more reliable than constructing it client-side because the
-        // server is the source of truth for what flow_id was actually assigned.
-        if (!S.flowId && chunk.flow_id) {
-          S.flowId = chunk.flow_id;
-          $('topbarFlowId').textContent  = S.flowId;
-          $('sidebarFlowId').textContent = S.flowId;
-        }
-
-        // Track highest sequence seen (used by approval POST and display).
-        if (chunk.sequence > S.lastSeq) S.lastSeq = chunk.sequence;
-
-        processChunk(chunk);
-
-        // Terminal condition: pipeline_complete chunk means the flow has finished
-        // and the generator returned. Don't wait for stream close.
-        if (chunk.stage === 'pipeline_complete') {
-          showCompletedView();
-          return;
-        }
-
-        // Error terminal: pipeline_error means the flow errored and returned.
-        // processChunk already showed the error and navigated to input view.
-        // Exit the read loop immediately so the STREAM_COMPLETED sentinel
-        // that follows does NOT trigger showCompletedView().
-        if (chunk.stage === 'pipeline_error') {
-          return;
-        }
+      if (chunk.stage === 'pipeline_complete') {
+        showCompletedView();
+        return;
+      }
+      // pipeline_error: processChunk already showed the error and
+      // navigated to the input view.
+      if (chunk.stage === 'pipeline_error') {
+        return;
       }
     }
-  } catch (e) {
-    // AbortError is expected if resetAll() cancels the reader — not a real error.
-    if (e.name !== 'AbortError') {
-      console.error('ResearchBot: stream read error:', e);
-      showErr('inputError', `Stream read error: ${e.message}`);
-      setStatus('dot-ruby', 'Error');
-      $('btnRun').disabled = false;
-      $('btnRunLabel').textContent = 'Run Pipeline';
-      showView('input');
+
+    // completed=true means platform has appended STREAM_COMPLETED and the
+    // flow has fully terminated. No further chunks will appear.
+    if (data.completed) {
+      showCompletedView();
+      return;
     }
-  } finally {
-    S.streamReader = null;
-    try { reader.releaseLock(); } catch (_) {}
   }
 }
 
@@ -1974,7 +1959,7 @@ async function startPipeline() {
     });
 
     // On non-2xx the platform returns application/json — parse and surface the error.
-    // On 200 the platform immediately begins streaming SSE — do NOT call resp.json().
+    // On 200 the flow has started; we will poll GET /api/stream for chunks.
     if (!resp.ok) {
       let errMsg = `HTTP ${resp.status}`;
       try {
@@ -1984,15 +1969,17 @@ async function startPipeline() {
       throw new Error(errMsg);
     }
 
-    // Init state. flowId will be populated from the first SSE chunk by consumeStream.
-    // We set a provisional value now so sidebar/topbar have something to display
-    // immediately; consumeStream will overwrite it with the server-authoritative value.
+    // provisionalFlowId matches what the flow encodes in every chunk's flow_id
+    // field (research:{request_id}). pollStream uses this to query GET /api/stream.
+    // processChunk will overwrite S.flowId with the server-confirmed value on
+    // the first chunk, but in practice it will equal provisionalFlowId.
     const provisionalFlowId = `research:${requestId}`;
     Object.assign(S, {
       flowId:      provisionalFlowId,
       lastSeq:     0,
       attempt:     1,
       streamReader: null,
+      pollAbort:   false,
       artifacts:   {},
       stageStatus: {},
       execSummary: '',
@@ -2014,16 +2001,24 @@ async function startPipeline() {
     $('sidebarAttempt').textContent    = 'Attempt 1';
     $('sidebarTitle').textContent      = 'Pipeline Running';
     $('sidebarLiveDot').className      = 'pulse-dot dot-amber';
-    $('sidebarLiveLabel').textContent  = 'Streaming chunks…';
+    $('sidebarLiveLabel').textContent  = 'Polling for chunks…';
     $('pipelineHeading').textContent   = 'Analysing abstract…';
     $('seqCounter').textContent        = 'seq: 0 · chunks: 0';
 
     showView('pipeline');
     setStatus('dot-amber', 'Running');
 
-    // Fire-and-forget the stream consumer. Errors are surfaced inside consumeStream.
-    consumeStream(resp).catch(err => {
-      console.error('ResearchBot: consumeStream rejected:', err);
+    // Discard the POST response body — the gateway buffers it until the flow
+    // generator returns and never delivers chunks in real-time. For a flow that
+    // blocks at wait_for_condition during the human gate this means the browser
+    // would receive nothing for ~80s before the gateway times out. Poll
+    // GET /api/stream instead; the platform streams DB is indexed by application
+    // flow_id and delivers chunks correctly for suspended flows.
+    try { resp.body.cancel(); } catch (_) {}
+
+    // Fire-and-forget the polling consumer. Errors are surfaced inside pollStream.
+    pollStream(provisionalFlowId).catch(err => {
+      console.error('ResearchBot: pollStream rejected:', err);
     });
 
   } catch (err) {
@@ -2069,7 +2064,9 @@ async function submitApproval(approved) {
 
 // ---- Reset ----
 function resetAll() {
-  // Cancel the live SSE stream reader if one is active.
+  // Abort any active polling loop.
+  S.pollAbort = true;
+  // Cancel the live stream reader if one is active (legacy, belt-and-suspenders).
   if (S.streamReader) {
     try { S.streamReader.cancel(); } catch (_) {}
     S.streamReader = null;
@@ -2077,6 +2074,7 @@ function resetAll() {
   Object.assign(S, {
     flowId: null, lastSeq: 0, attempt: 1,
     streamReader: null,
+    pollAbort: false,
     artifacts: {}, stageStatus: {},
     execSummary: '', totalAttempts: 1, chunkCount: 0,
   });
