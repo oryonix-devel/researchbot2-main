@@ -14,7 +14,7 @@ Pipeline stages (serial, Temporal-durable):
 
 Human approval gate with unlimited iterative refinement loop.
 Streaming via generator-yield; STREAM_COMPLETED appended by SDK automatically.
-All @fc.compute and @fc.flow calls use keyword arguments exclusively.
+All @onix.compute and @onix.flow calls use keyword arguments exclusively.
 """
 
 import datetime
@@ -22,14 +22,14 @@ import json
 import urllib.error
 import urllib.request
 
-import fc
+import onix
 
 
 # ---------------------------------------------------------------------------
 # Global approval registry
 # Keyed by flow_id (equals raw request_id — the Temporal workflow ID).
-# Written exclusively by the @fc.signal submit_approval.
-# Read exclusively by fc.wait_for_condition inside run_research_pipeline.
+# Written exclusively by the @onix.signal submit_approval.
+# Read exclusively by onix.wait_for_condition inside run_research_pipeline.
 # Replayed deterministically by Temporal's event-sourced execution model.
 # ---------------------------------------------------------------------------
 _approval_registry: dict = {}
@@ -48,14 +48,14 @@ _GEMINI_MODEL_LABEL = "gemini"
 # Compute error contract
 #
 # Context: the Oryonix compute worker has a known bug (unfixed in master) where
-# any exception that escapes a @fc.compute WASM boundary is incorrectly reported
+# any exception that escapes a @onix.compute WASM boundary is incorrectly reported
 # to Temporal as ActivityExecutionResult(Cancellation(...)) rather than
 # ActivityExecutionResult(Failure(...)).  Temporal then rejects the completion
 # with "unable to mark activity as canceled without activity being request
 # canceled first" because no cancellation was requested — it was a plain
 # failure.  This kills the workflow entirely.
 #
-# Workaround: exceptions must never escape @fc.compute functions.  Instead,
+# Workaround: exceptions must never escape @onix.compute functions.  Instead,
 # each compute catches Exception internally, encodes the error as a prefixed
 # return string, and returns normally.  The flow inspects every result with
 # _is_compute_error() and, on a positive match, yields a pipeline_error chunk
@@ -81,7 +81,7 @@ def _extract_compute_error(result: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Internal helpers (not fc primitives — pure deterministic utilities)
+# Internal helpers (not onix primitives — pure deterministic utilities)
 # ---------------------------------------------------------------------------
 
 def _utc_now() -> str:
@@ -181,7 +181,7 @@ def _gemini_generate(gemini_api_key: str, prompt: str) -> str:
 
 # ---------------------------------------------------------------------------
 # Pipeline stage compute functions
-# Each is a @fc.compute (Temporal activity):
+# Each is a @onix.compute (Temporal activity):
 #   - Accepts gemini_api_key; never hardcodes credentials.
 #   - Calls Gemini via _gemini_generate with a stage-specific prompt.
 #   - Fully buffers and returns the response text.
@@ -189,7 +189,7 @@ def _gemini_generate(gemini_api_key: str, prompt: str) -> str:
 #   - Must NOT call other compute functions or flows.
 # ---------------------------------------------------------------------------
 
-@fc.compute
+@onix.compute
 def structural_decomposition(abstract: str, gemini_api_key: str) -> str:
     """
     Stage 1 — Structural Decomposition.
@@ -214,7 +214,7 @@ def structural_decomposition(abstract: str, gemini_api_key: str) -> str:
         return f"{_COMPUTE_ERROR_PREFIX}{exc!r}"
 
 
-@fc.compute
+@onix.compute
 def evidence_extraction(
     abstract: str,
     decomposition: str,
@@ -245,7 +245,7 @@ def evidence_extraction(
         return f"{_COMPUTE_ERROR_PREFIX}{exc!r}"
 
 
-@fc.compute
+@onix.compute
 def risk_analysis(
     abstract: str,
     evidence: str,
@@ -277,7 +277,7 @@ def risk_analysis(
         return f"{_COMPUTE_ERROR_PREFIX}{exc!r}"
 
 
-@fc.compute
+@onix.compute
 def comparative_context_generation(
     abstract: str,
     risk: str,
@@ -307,7 +307,7 @@ def comparative_context_generation(
         return f"{_COMPUTE_ERROR_PREFIX}{exc!r}"
 
 
-@fc.compute
+@onix.compute
 def executive_summary_synthesis(
     abstract: str,
     decomposition: str,
@@ -344,7 +344,7 @@ def executive_summary_synthesis(
         return f"{_COMPUTE_ERROR_PREFIX}{exc!r}"
 
 
-@fc.compute
+@onix.compute
 def refined_executive_summary_synthesis(
     abstract: str,
     last_summary: str,
@@ -386,18 +386,18 @@ def refined_executive_summary_synthesis(
 # ---------------------------------------------------------------------------
 # Signal — Human approval gate
 #
-# Decorated with @fc.signal, making it a direct API entrypoint.
+# Decorated with @onix.signal, making it a direct API entrypoint.
 # operationId in server.yaml MUST match function name exactly: submit_approval
 #
 # Mutates _approval_registry global in-memory state.
-# The parent flow polls this state via fc.wait_for_condition.
+# The parent flow polls this state via onix.wait_for_condition.
 #
 # MUST NOT be wrapped in a flow.
 # MUST NOT spawn new flows.
 # MUST NOT modify the flow_id.
 # ---------------------------------------------------------------------------
 
-@fc.signal
+@onix.signal
 def submit_approval(flow_id: str, approved: bool, critique: str) -> None:
     """
     Receive human approval decision for the given flow.
@@ -430,7 +430,7 @@ def submit_approval(flow_id: str, approved: bool, critique: str) -> None:
 # No parallelisation — stages execute strictly serially.
 # ---------------------------------------------------------------------------
 
-@fc.flow
+@onix.flow
 def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
     """
     Orchestrate the full research evaluation pipeline.
@@ -441,7 +441,7 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
     Execution model:
       1. Run five serial pipeline stage compute functions.
       2. Yield streaming chunks after each stage (and sub-steps within stages).
-      3. Block at the human approval gate via fc.wait_for_condition.
+      3. Block at the human approval gate via onix.wait_for_condition.
       4. On approval → emit final chunk and return.
       5. On rejection → increment attempt, call refinement compute, loop.
       6. Loop is unlimited; no attempt cap.
@@ -486,7 +486,7 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
 
     def _error_chunk(failed_stage: str, error_msg: str) -> dict:
         """
-        Emit a pipeline_error chunk when a @fc.compute activity returns an
+        Emit a pipeline_error chunk when a @onix.compute activity returns an
         encoded error string (see _COMPUTE_ERROR_PREFIX / _is_compute_error).
         The error is surfaced in the NDJSON stream so the client can display it
         instead of a silent stream close.
@@ -717,7 +717,7 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
     #
     # Loop is semantically:
     #   1. Emit awaiting_approval chunk.
-    #   2. Block via fc.wait_for_condition until submit_approval fires.
+    #   2. Block via onix.wait_for_condition until submit_approval fires.
     #   3. Pop and inspect the approval record.
     #   4. If approved → emit final chunk and return (ends generator).
     #   5. If rejected → increment attempt, run refined_executive_summary_synthesis,
@@ -750,7 +750,7 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
         # Block deterministically until submit_approval writes to _approval_registry.
         # Temporal replays this condition check against replayed signal events.
         # The lambda captures flow_id (immutable string) — safe for replay.
-        fc.wait_for_condition(lambda: flow_id in _approval_registry)
+        onix.wait_for_condition(lambda: flow_id in _approval_registry)
 
         # Consume the approval record atomically.
         # Using dict.pop ensures the entry is removed exactly once.
