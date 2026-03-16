@@ -40,7 +40,8 @@ _approval_registry: dict = {}
 # ---------------------------------------------------------------------------
 _GEMINI_ENDPOINT = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
-    "gemini-3-flash-preview:generateContent"
+    # "gemini-3-flash-preview:generateContent"
+    "gemini-2.5-flash-lite:generateContent"
 )
 _GEMINI_MODEL_LABEL = "gemini"
 
