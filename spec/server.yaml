@@ -22,10 +22,10 @@ paths:
       description: >
         Starts a new durable research evaluation workflow.
         The client MUST supply a globally unique request_id.
-        The workflow is assigned the flow ID "research:{request_id}".
-        The response is a pull-based stream of JSON chunks.
-        Each chunk conforms to the ResearchChunk schema.
-        The stream is terminated by the platform-appended STREAM_COMPLETED sentinel.
+        The platform registers the workflow under the ID "research:{request_id}"
+        as specified by x-onix-workflow-id. This same ID is embedded in every
+        chunk's flow_id field and must be used verbatim in the
+        PATCH /api/approval X-Flow-ID header.
 
         Pipeline stages executed serially:
           1. structural_decomposition
@@ -35,8 +35,10 @@ paths:
           5. executive_summary_synthesis
 
         After stage 5 completes the workflow pauses at the human approval gate
-        (stage: awaiting_approval). Resume by calling POST /api/approval.
+        (stage: awaiting_approval). Resume by calling PATCH /api/approval.
+        The stream remains open while the workflow is suspended.
       operationId: run_research_pipeline
+      x-onix-workflow-id: "research:{request_id}"
       requestBody:
         required: true
         content:
@@ -53,7 +55,8 @@ paths:
       responses:
         "200":
           description: >
-            Streaming response. Each line is a JSON object conforming to ResearchChunk.
+            Streaming response (NDJSON). Each line is a JSON object conforming
+            to ResearchChunk. The first chunk contains the authoritative flow_id.
             The stream ends with the platform-appended STREAM_COMPLETED sentinel.
           content:
             application/x-ndjson:

@@ -1152,7 +1152,7 @@
             <input type="text" id="requestId" placeholder="EVAL-001" autocomplete="off" spellcheck="false" />
             <button class="input-addon-btn" id="genId">gen</button>
           </div>
-          <div class="field-hint">// flow_id = research:{request_id} — must be unique per evaluation</div>
+          <div class="field-hint">// must be unique per run — reusing an ID returns 409. click gen for a fresh one.</div>
         </div>
 
         <!-- Abstract -->
@@ -1702,8 +1702,7 @@ function processChunk(chunk) {
       if (artifact && artifact.final_summary) {
         S.execSummary = artifact.final_summary;
       }
-      // showCompletedView() is called immediately after processChunk returns
-      // in the pollStream loop — see the check below.
+      // showCompletedView() is called by _handleSseLine after processChunk returns.
       break;
 
     // ---- Refinement ----
@@ -1788,7 +1787,7 @@ function processChunk(chunk) {
       }
       break;
 
-    // ---- Pipeline error — surfaced from @fc.compute exception ----
+    // ---- Pipeline error — surfaced from @onix.compute exception ----
     // Emitted by the flow when a compute activity exhausts Temporal retries.
     // artifact: { message, failed_stage }
     // consumeStream exits immediately after processChunk returns for this stage
@@ -1803,6 +1802,10 @@ function processChunk(chunk) {
         `sandbox cannot reach the Gemini API endpoint — check outbound HTTPS ` +
         `access from your Oryonix dev environment and verify your API key.`
       );
+      // Clear flowId so a retry with a new request_id doesn't inherit stale state.
+      // The user must supply a fresh request_id to avoid a 409 from the platform.
+      S.flowId = null;
+      S.pollAbort = true;
       $('btnRun').disabled = false;
       $('btnRunLabel').textContent = 'Run Pipeline';
       showView('input');
@@ -1844,16 +1847,16 @@ function showCompletedView() {
 
 // ---- POST /api/run SSE stream consumer ----
 //
-// The platform streams all ResearchChunks through the POST /api/run response
-// body as Server-Sent Events (content-type: text/event-stream).
+// Reads the NDJSON/SSE response body of POST /api/run directly.
+// The platform-assigned flow_id arrives in the first chunk (stage: pipeline_started)
+// and is written into S.flowId by _handleSseLine. By the time the flow reaches
+// the awaiting_approval gate, S.flowId is always set and ready for the
+// PATCH /api/approval X-Flow-ID header.
 //
 // Wire format:
-//   event:message\ndata:{json}\n\n
+//   event:message\ndata:{json}\n\n   — or plain NDJSON, one JSON object per line
 //   event:message\ndata:STREAM_COMPLETED\n\n
-//
-// The flow stays alive and keeps streaming even while blocked at the
-// awaiting_approval gate — we simply keep reading until a terminal event.
-async function consumeStream(resp, flowId) {
+async function consumeStream(resp) {
   S.pollAbort = false;
 
   const reader  = resp.body.getReader();
@@ -1868,25 +1871,23 @@ async function consumeStream(resp, flowId) {
       const { done, value } = await reader.read();
 
       if (done) {
-        // Stream closed — flush any remaining buffer.
         if (buf.trim()) {
           const line = _extractSseLine(buf.trim());
-          if (line) _handleSseLine(line, flowId);
+          if (line) _handleSseLine(line);
         }
         break;
       }
 
       buf += decoder.decode(value, { stream: true });
 
-      // SSE events are separated by \n\n.
       const parts = buf.split(/\n\n|\r\n\r\n/);
-      buf = parts.pop(); // keep incomplete trailing fragment
+      buf = parts.pop();
 
       for (const part of parts) {
         if (!part.trim()) continue;
         const line = _extractSseLine(part.trim());
         if (!line) continue;
-        const terminal = _handleSseLine(line, flowId);
+        const terminal = _handleSseLine(line);
         if (terminal || S.pollAbort) return;
       }
     }
@@ -1924,7 +1925,7 @@ function _extractSseLine(eventBlock) {
 
 // Process a single SSE payload string (JSON chunk or sentinel).
 // Returns true if this event signals stream termination.
-function _handleSseLine(line, flowId) {
+function _handleSseLine(line) {
   if (line === 'STREAM_COMPLETED' || line === '"STREAM_COMPLETED"') {
     showCompletedView();
     return true;
@@ -1938,7 +1939,8 @@ function _handleSseLine(line, flowId) {
     return false;
   }
 
-  // On the first chunk, confirm flow_id.
+  // Capture the platform-assigned flow_id from the first chunk.
+  // This is the real Temporal workflow ID used for PATCH /api/approval.
   if (!S.flowId && chunk.flow_id) {
     S.flowId = chunk.flow_id;
     $('topbarFlowId').textContent  = S.flowId;
@@ -1985,7 +1987,6 @@ async function startPipeline() {
     });
 
     // On non-2xx the platform returns application/json — parse and surface the error.
-    // On 200 the flow has started; we will poll GET /api/stream for chunks.
     if (!resp.ok) {
       let errMsg = `HTTP ${resp.status}`;
       try {
@@ -1995,10 +1996,9 @@ async function startPipeline() {
       throw new Error(errMsg);
     }
 
-    // provisionalFlowId matches what the flow encodes in every chunk's flow_id
-    // field (research:{request_id}). pollStream uses this to query GET /api/stream.
-    // processChunk will overwrite S.flowId with the server-confirmed value on
-    // the first chunk, but in practice it will equal provisionalFlowId.
+    // The flow embeds flow_id = f"research:{request_id}" in every chunk.
+    // We can display it immediately as a provisional value; consumeStream
+    // will confirm it when the first chunk arrives (and overwrite if different).
     const provisionalFlowId = `research:${requestId}`;
     Object.assign(S, {
       flowId:      provisionalFlowId,
@@ -2011,12 +2011,13 @@ async function startPipeline() {
       execSummary: '',
       totalAttempts: 1,
       chunkCount:  0,
+      _pollTimer:  null,
     });
 
     // Prime stage statuses
     STAGE_DEFS.forEach(d => { S.stageStatus[d.key] = 'idle'; });
 
-    // Update topbar
+    // Update topbar — flow_id not known yet; will be set by first chunk
     $('topbarFlowId').textContent      = provisionalFlowId;
     $('topbarFlowId').style.display    = 'block';
 
@@ -2034,9 +2035,10 @@ async function startPipeline() {
     showView('pipeline');
     setStatus('dot-amber', 'Running');
 
-    // The platform streams all SSE chunks through the POST /api/run response
-    // body (content-type: text/event-stream). Read it directly — do NOT cancel.
-    consumeStream(resp, provisionalFlowId).catch(err => {
+    // Read chunks from the POST /api/run SSE response body.
+    // The platform-assigned flow_id arrives in the first chunk and is captured
+    // by consumeStream — S.flowId will be set before the approval gate is reached.
+    consumeStream(resp).catch(err => {
       console.error('ResearchBot: consumeStream rejected:', err);
     });
 
@@ -2086,9 +2088,10 @@ async function submitApproval(approved) {
 
 // ---- Reset ----
 function resetAll() {
-  // Abort any active polling loop.
+  // Abort the polling loop and cancel any pending timer.
   S.pollAbort = true;
-  // Cancel the live stream reader if one is active (legacy, belt-and-suspenders).
+  if (S._pollTimer) { clearTimeout(S._pollTimer); S._pollTimer = null; }
+  // Cancel the live stream reader if one is still active (belt-and-suspenders).
   if (S.streamReader) {
     try { S.streamReader.cancel(); } catch (_) {}
     S.streamReader = null;
@@ -2097,6 +2100,7 @@ function resetAll() {
     flowId: null, lastSeq: 0, attempt: 1,
     streamReader: null,
     pollAbort: false,
+    _pollTimer: null,
     artifacts: {}, stageStatus: {},
     execSummary: '', totalAttempts: 1, chunkCount: 0,
   });

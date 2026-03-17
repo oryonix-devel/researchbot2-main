@@ -17,7 +17,6 @@ Streaming via generator-yield; STREAM_COMPLETED appended by SDK automatically.
 All @onix.compute and @onix.flow calls use keyword arguments exclusively.
 """
 
-import datetime
 import json
 import urllib.error
 import urllib.request
@@ -85,10 +84,6 @@ def _extract_compute_error(result: str) -> str:
 # Internal helpers (not onix primitives — pure deterministic utilities)
 # ---------------------------------------------------------------------------
 
-def _utc_now() -> str:
-    """Return current UTC time in ISO-8601 format with Z suffix."""
-    return datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
-
 
 def _build_chunk(
     flow_id: str,
@@ -99,10 +94,13 @@ def _build_chunk(
     artifact: dict,
 ) -> dict:
     """
-    Construct a streaming chunk conforming to the mandatory schema (§13).
-    'sequence' must be supplied by the caller from a locally-maintained counter.
-    'timestamp' is set at emission time; it is informational only and not used
-    for routing or ordering — sequence is the authoritative ordering field.
+    Construct a streaming chunk conforming to the mandatory schema.
+    'sequence' is the authoritative ordering field — supplied by the caller
+    from a locally-maintained counter.
+    'timestamp' is set to an empty string. Generating a live timestamp inside
+    a @onix.flow is non-deterministic (violates durable execution replay
+    guarantees). The field is informational only and never used for ordering
+    or routing; the platform streaming DB holds authoritative server-side times.
     """
     return {
         "flow_id": flow_id,
@@ -112,13 +110,13 @@ def _build_chunk(
         "attempt": attempt,
         "artifact": artifact,
         "model": _GEMINI_MODEL_LABEL,
-        "timestamp": _utc_now(),
+        "timestamp": "",
     }
 
 
 def _gemini_generate(gemini_api_key: str, prompt: str) -> str:
     """
-    Gemini-3 Flash synchronous request.
+    gemini-2.5-flash-lite synchronous request.
 
     Design preserved:
     - stdlib urllib only (WASM safe)
@@ -427,13 +425,18 @@ def submit_approval(flow_id: str, approved: bool, critique: str) -> None:
 #
 # operationId in server.yaml MUST match function name: run_research_pipeline
 #
-# Returns a generator → SDK auto-detects and streams each yielded chunk.
+# Generator flow: yields streaming chunks that the platform persists to its
+# streaming DB. Chunks are served to the client via GET /api/stream.
 # SDK appends STREAM_COMPLETED sentinel automatically.
 # Developer MUST NOT append STREAM_COMPLETED.
 #
+# flow_id is constructed as "research:{request_id}" — a stable, unique,
+# human-readable identifier embedded in every chunk. The client reads it
+# from the first chunk and uses it verbatim in PATCH /api/approval X-Flow-ID.
+# The signal endpoint routes by this value via the Oryonix signal registry.
+#
 # Sequence counter is local to this invocation; does not rely on DB chunk_id.
 # All compute and flow calls use keyword arguments exclusively.
-# No UUID generation inside the flow.
 # No parallelisation — stages execute strictly serially.
 # ---------------------------------------------------------------------------
 
@@ -442,22 +445,19 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
     """
     Orchestrate the full research evaluation pipeline.
 
-    Flow ID: research:{request_id}  (set externally at flow start time)
-    The flow_id IS the request_id — the platform uses it as the Temporal workflow ID.
-
     Execution model:
       1. Run five serial pipeline stage compute functions.
       2. Yield streaming chunks after each stage (and sub-steps within stages).
       3. Block at the human approval gate via onix.wait_for_condition.
-      4. On approval → emit final chunk and return.
-      5. On rejection → increment attempt, call refinement compute, loop.
+      4. On approval -> emit final chunk and return.
+      5. On rejection -> increment attempt, call refinement compute, loop.
       6. Loop is unlimited; no attempt cap.
     """
 
-    # flow_id is embedded in every yielded chunk. The UI extracts it from the
-    # first chunk of the POST /api/run SSE stream rather than constructing it
-    # client-side, so any value is fine as long as it is stable and unique.
-    # We use "research:{request_id}" as a human-readable namespaced identifier.
+    # flow_id is a stable, unique identifier for this pipeline run.
+    # Constructed from request_id so it is deterministic and human-readable.
+    # Embedded in every chunk; the client reads it from the first chunk and
+    # sends it back verbatim in the PATCH /api/approval X-Flow-ID header.
     flow_id: str = f"research:{request_id}"
 
     # Local sequence counter — authoritative ordering for this stream.
@@ -477,11 +477,6 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
         return _sequence
 
     def _chunk(stage: str, status: str, artifact: dict) -> dict:
-        """
-        Emit a chunk with the current flow_id, auto-incremented sequence,
-        and current attempt. Reads 'attempt' from enclosing scope at call time,
-        so refinement iterations correctly reflect the incremented value.
-        """
         return _build_chunk(
             flow_id=flow_id,
             sequence=_next_seq(),
@@ -492,12 +487,6 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
         )
 
     def _error_chunk(failed_stage: str, error_msg: str) -> dict:
-        """
-        Emit a pipeline_error chunk when a @onix.compute activity returns an
-        encoded error string (see _COMPUTE_ERROR_PREFIX / _is_compute_error).
-        The error is surfaced in the NDJSON stream so the client can display it
-        instead of a silent stream close.
-        """
         return _build_chunk(
             flow_id=flow_id,
             sequence=_next_seq(),
@@ -721,26 +710,10 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
 
     # ==================================================================
     # HUMAN APPROVAL GATE — Iterative refinement loop
-    #
-    # Loop is semantically:
-    #   1. Emit awaiting_approval chunk.
-    #   2. Block via onix.wait_for_condition until submit_approval fires.
-    #   3. Pop and inspect the approval record.
-    #   4. If approved → emit final chunk and return (ends generator).
-    #   5. If rejected → increment attempt, run refined_executive_summary_synthesis,
-    #      update 'summary', continue loop.
-    #
-    # The flow_id is stable across all iterations.
-    # No new flow is spawned on rejection.
-    # Only abstract + last_summary + critique are fed to refinement (§12).
-    # The loop is unlimited; no attempt cap (§12).
     # ==================================================================
 
     while True:
 
-        # Emit the awaiting_approval chunk before blocking.
-        # This ensures the client receives the current summary and can present
-        # it to the human reviewer.
         yield _chunk(
             stage="awaiting_approval",
             status="pending",
@@ -754,31 +727,20 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
             },
         )
 
-        # Block deterministically until submit_approval writes to _approval_registry.
-        # Temporal replays this condition check against replayed signal events.
-        # The lambda captures flow_id (immutable string) — safe for replay.
         onix.wait_for_condition(lambda: flow_id in _approval_registry)
 
-        # Consume the approval record atomically.
-        # Using dict.pop ensures the entry is removed exactly once.
-        # If the flow replays and the signal has not re-fired yet,
-        # wait_for_condition will correctly block until it does.
         approval_record: dict = _approval_registry.pop(flow_id)
         approved: bool = approval_record["approved"]
         critique: str = approval_record["critique"]
 
         if approved:
-            # Emit approval_received first so the UI can close the approval modal.
             yield _chunk(
                 stage="approval_received",
                 status="approved",
                 artifact={
-                    "message": (
-                        f"Approval received for attempt {attempt}: accepted."
-                    ),
+                    "message": f"Approval received for attempt {attempt}: accepted.",
                 },
             )
-            # Human accepted — pipeline is complete.
             yield _chunk(
                 stage="pipeline_complete",
                 status="approved",
@@ -791,16 +753,8 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
                     "total_attempts": attempt,
                 },
             )
-            # Returning from the generator signals normal completion.
-            # The SDK appends STREAM_COMPLETED automatically.
             return
 
-        # ------------------------------------------------------------------
-        # Rejection path — begin a new refinement iteration.
-        # ------------------------------------------------------------------
-
-        # Emit approval_received/rejected so UI closes the approval modal
-        # and switches back to the pipeline view before refinement begins.
         yield _chunk(
             stage="approval_received",
             status="rejected",
@@ -813,7 +767,7 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
             },
         )
 
-        attempt += 1  # Increment before emitting so chunks reflect new attempt.
+        attempt += 1
 
         yield _chunk(
             stage="refinement_started",
@@ -847,7 +801,6 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
             },
         )
 
-        # Refinement compute: abstract + last summary + critique ONLY (§12).
         summary = refined_executive_summary_synthesis(
             abstract=abstract,
             last_summary=summary,
