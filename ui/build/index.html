@@ -1982,7 +1982,10 @@ async function startPipeline() {
   try {
     const resp = await fetch('/api/run', {
       method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Flow-ID':    `research:${requestId}`,
+      },
       body:    JSON.stringify({ request_id: requestId, abstract, gemini_api_key: apiKey }),
     });
 
@@ -2068,10 +2071,19 @@ async function submitApproval(approved) {
         'Content-Type': 'application/json',
         'X-Flow-ID': S.flowId,
       },
-      body:    JSON.stringify({ approved, critique }),
+      // flow_id is included in the body so the platform can map it to the
+      // submit_approval signal function's flow_id parameter.
+      // X-Flow-ID header is kept for platform-level workflow routing.
+      body:    JSON.stringify({ flow_id: S.flowId, approved, critique }),
     });
-    const data = await resp.json();
-    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    // Platform returns 200 with empty body on signal acceptance.
+    // Guard against JSON.parse failing on empty or non-JSON responses.
+    let data = {};
+    try {
+      const text = await resp.text();
+      if (text && text.trim()) data = JSON.parse(text);
+    } catch (_) {}
+    if (!resp.ok) throw new Error(data.error || data.message || `HTTP ${resp.status}`);
 
     // Re-enable after short delay (in case approval_received chunk hasn't arrived yet)
     setTimeout(() => {

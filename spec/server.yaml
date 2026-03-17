@@ -190,11 +190,13 @@ paths:
               approve:
                 summary: Approve the current summary
                 value:
+                  flow_id: "research:abc123"
                   approved: true
                   critique: ""
               reject:
                 summary: Reject with critique
                 value:
+                  flow_id: "research:abc123"
                   approved: false
                   critique: "The risk assessment is too optimistic. Please strengthen the methodological risk section."
       responses:
@@ -291,9 +293,19 @@ components:
     ApprovalRequest:
       type: object
       required:
+        - flow_id
         - approved
         - critique
       properties:
+        flow_id:
+          type: string
+          description: >
+            The flow ID of the target workflow. Format: "research:{request_id}".
+            Must match the flow_id returned by POST /api/run and the X-Flow-ID
+            header exactly. The platform maps this body field to the flow_id
+            parameter of the submit_approval signal function.
+          example: "research:abc123"
+          minLength: 1
         approved:
           type: boolean
           description: >
