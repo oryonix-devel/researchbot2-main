@@ -390,6 +390,12 @@ def refined_executive_summary_synthesis(
 # Decorated with @onix.signal, making it a direct API entrypoint.
 # operationId in server.yaml MUST match function name exactly: submit_approval
 #
+# The endpoint is PATCH /api/approval.
+# flow_id is supplied by the caller in the X-Flow-ID request header — NOT in
+# the request body. The platform extracts the header value and passes it to
+# this function as the flow_id keyword argument, then delivers it as a signal
+# to the workflow identified by that flow_id.
+#
 # Mutates _approval_registry global in-memory state.
 # The parent flow polls this state via onix.wait_for_condition.
 #
@@ -405,8 +411,8 @@ def submit_approval(flow_id: str, approved: bool, critique: str) -> None:
     Writes approval state into _approval_registry keyed by flow_id.
     The orchestrating flow unblocks when it detects its flow_id present.
 
-    Signal payload (§11):
-      flow_id  — equals request_id supplied to POST /api/run
+    Signal payload:
+      flow_id  — sourced from X-Flow-ID request header; format "research:{request_id}"
       approved — true: pipeline accepted; false: trigger refinement iteration
       critique — human feedback text; used in refinement prompt on rejection
     """

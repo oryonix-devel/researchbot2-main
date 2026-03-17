@@ -150,12 +150,15 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
 
   /api/approval:
-    post:
+    patch:
       summary: Submit human approval or rejection decision
       description: >
         Sends a signal to a paused research evaluation workflow.
         The target workflow must be paused at the awaiting_approval stage.
-        The flow_id must match exactly: "research:{request_id}".
+
+        The flow_id of the target workflow MUST be supplied in the X-Flow-ID
+        request header. Format: "research:{request_id}". Must match the flow_id
+        returned by POST /api/run exactly.
 
         If approved=true the workflow proceeds to emit a pipeline_complete chunk
         and terminates.
@@ -164,6 +167,16 @@ paths:
         the provided critique. Only the original abstract, last executive summary,
         and critique are passed to the refinement model call. The loop is unlimited.
       operationId: submit_approval
+      parameters:
+        - name: X-Flow-ID
+          in: header
+          required: true
+          description: >
+            The flow ID of the target workflow. Format: "research:{request_id}".
+            Must match the flow_id emitted in the awaiting_approval chunk exactly.
+          schema:
+            type: string
+            example: "research:abc123"
       requestBody:
         required: true
         content:
@@ -174,13 +187,11 @@ paths:
               approve:
                 summary: Approve the current summary
                 value:
-                  flow_id: "research:abc123"
                   approved: true
                   critique: ""
               reject:
                 summary: Reject with critique
                 value:
-                  flow_id: "research:abc123"
                   approved: false
                   critique: "The risk assessment is too optimistic. Please strengthen the methodological risk section."
       responses:
@@ -191,7 +202,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ApprovalResponse"
         "400":
-          description: Validation error — flow_id missing or approved field invalid.
+          description: Validation error — X-Flow-ID header missing or approved field invalid.
           content:
             application/json:
               schema:
@@ -277,17 +288,9 @@ components:
     ApprovalRequest:
       type: object
       required:
-        - flow_id
         - approved
         - critique
       properties:
-        flow_id:
-          type: string
-          description: >
-            Exact flow ID of the target workflow. Format: "research:{request_id}".
-            Must match the flow_id emitted in the awaiting_approval chunk exactly.
-          example: "research:abc123"
-          minLength: 1
         approved:
           type: boolean
           description: >

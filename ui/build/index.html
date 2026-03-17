@@ -2061,9 +2061,12 @@ async function submitApproval(approved) {
 
   try {
     const resp = await fetch('/api/approval', {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ flow_id: S.flowId, approved, critique }),
+      method:  'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Flow-ID': S.flowId,
+      },
+      body:    JSON.stringify({ approved, critique }),
     });
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
