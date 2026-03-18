@@ -1323,8 +1323,10 @@
 
    Architecture:
    - State machine: IDLE → RUNNING → AWAITING_APPROVAL → (RUNNING) → COMPLETED
-   - Polling: GET /api/stream?flow_id=&after_sequence= every 2s
-   - Signals: POST /api/approval {flow_id, approved, critique}
+   - Streaming: POST /api/run response body — platform streams chunks in real-time
+     as the flow yields them. Connection stays open across wait_for_condition
+     suspension; resumes automatically when the signal unblocks the flow.
+   - Signals: PATCH /api/approval {flow_id, approved, critique}
    - Stage outputs accumulate in stageArtifacts map and persist across refinements
 
    Stage keys (ordered):
@@ -1338,9 +1340,11 @@
 'use strict';
 
 // ---- Config ----
-// Chunks are consumed by polling GET /api/stream every 1.5s.
-// The POST /api/run response body is discarded — the gateway buffers it until
-// flow completion and never delivers chunks in real-time for suspended flows.
+// Chunks are consumed by reading the POST /api/run response body as a live
+// stream. The platform delivers each yielded chunk in real-time regardless of
+// whether the flow is running or suspended at the human approval gate.
+// The HTTP connection stays open across onix.wait_for_condition and resumes
+// delivering chunks when the PATCH /api/approval signal unblocks the flow.
 const STAGE_DEFS   = [
   { key: 'structural_decomposition',       num: '01', label: 'Structural Decomposition',    short: 'Structure' },
   { key: 'evidence_extraction',            num: '02', label: 'Evidence Extraction',         short: 'Evidence'  },
@@ -1790,8 +1794,8 @@ function processChunk(chunk) {
     // ---- Pipeline error — surfaced from @onix.compute exception ----
     // Emitted by the flow when a compute activity exhausts Temporal retries.
     // artifact: { message, failed_stage }
-    // consumeStream exits immediately after processChunk returns for this stage
-    // so STREAM_COMPLETED never triggers showCompletedView().
+    // consumeStream exits immediately after processChunk returns for this stage;
+    // STREAM_COMPLETED arrives next but showCompletedView() is never reached.
     case 'pipeline_error': {
       const errMsg = (artifact && artifact.message) || 'An unknown pipeline error occurred.';
       const failedStage = (artifact && artifact.failed_stage) || stage;
