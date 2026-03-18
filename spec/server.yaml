@@ -37,6 +37,12 @@ paths:
         After stage 5 completes the workflow pauses at the human approval gate
         (stage: awaiting_approval). Resume by calling PATCH /api/approval.
         The stream remains open while the workflow is suspended.
+
+        On rejection the workflow enters an unlimited refinement loop: it runs
+        refined_executive_summary_synthesis and returns to the approval gate.
+        The attempt counter increments with each rejection. The loop ends only
+        when the human approves, at which point the workflow emits a
+        pipeline_complete chunk and terminates.
       operationId: run_research_pipeline
       x-onix-workflow-id: "research:{request_id}"
       requestBody:
@@ -55,9 +61,12 @@ paths:
       responses:
         "200":
           description: >
-            Streaming response (NDJSON). Each line is a JSON object conforming
-            to ResearchChunk. The first chunk contains the authoritative flow_id.
-            The stream ends with the platform-appended STREAM_COMPLETED sentinel.
+            Streaming response (NDJSON / SSE). Each event is a JSON object
+            conforming to ResearchChunk. The first chunk contains the
+            authoritative flow_id. The stream ends with the platform-appended
+            STREAM_COMPLETED sentinel. The HTTP connection stays open across
+            onix.wait_for_condition suspension and resumes delivering chunks
+            when PATCH /api/approval unblocks the workflow.
           content:
             application/x-ndjson:
               schema:
@@ -88,8 +97,12 @@ paths:
         Sends a signal to a paused research evaluation workflow.
         The target workflow must be paused at the awaiting_approval stage.
 
-        The flow_id of the target workflow MUST be supplied in the X-Flow-ID
-        request header. Format: "research:{request_id}". Must match the flow_id
+        The flow_id of the target workflow MUST be supplied in both:
+          - the X-Flow-ID request header (used by the platform for workflow routing)
+          - the request body flow_id field (mapped to the submit_approval signal
+            function's flow_id parameter)
+
+        Format for both: "research:{request_id}". Must match the flow_id
         returned by POST /api/run exactly.
 
         If approved=true the workflow proceeds to emit a pipeline_complete chunk
@@ -105,6 +118,7 @@ paths:
           required: true
           description: >
             The flow ID of the target workflow. Format: "research:{request_id}".
+            Used by the platform to route this signal to the correct workflow.
             Must match the flow_id emitted in the awaiting_approval chunk exactly.
           schema:
             type: string
@@ -233,7 +247,7 @@ components:
       description: >
         A single streaming chunk emitted by the research evaluation pipeline.
         Chunks are ordered by the 'sequence' field, which is the authoritative
-        ordering mechanism. Do not rely on arrival order or chunk_id.
+        ordering mechanism. Do not rely on arrival order or database chunk_id.
       required:
         - flow_id
         - sequence
@@ -298,7 +312,8 @@ components:
             Stage-specific payload. Schema varies by stage.
             Contains 'result' (Gemini response text) on completion chunks.
             Contains 'message' on status/progress chunks.
-            Contains 'current_summary' or 'final_summary' on approval-gate chunks.
+            Contains 'current_summary' on awaiting_approval chunks.
+            Contains 'final_summary' and 'total_attempts' on pipeline_complete chunks.
           additionalProperties: true
         model:
           type: string
@@ -311,9 +326,9 @@ components:
           description: >
             ISO-8601 UTC timestamp of chunk emission. Informational only.
             Use 'sequence' for authoritative ordering.
-            MAY be an empty string: generating a live timestamp inside a
+            Always an empty string: generating a live timestamp inside a
             @onix.flow violates deterministic replay guarantees.
-          example: "2024-11-15T10:23:45.123456Z"
+          example: ""
 
     ErrorResponse:
       type: object

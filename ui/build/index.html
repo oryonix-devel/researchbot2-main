@@ -1355,15 +1355,17 @@ const STAGE_DEFS   = [
 
 // ---- Application State ----
 const S = {
-  flowId:        null,
-  lastSeq:       0,
-  attempt:       1,
-  streamReader:  null,  // active ReadableStreamDefaultReader, cancelled on reset
-  artifacts:     {},    // stage key -> text
-  stageStatus:   {},    // stage key -> 'idle'|'active'|'done'
-  execSummary:   '',
-  totalAttempts: 1,
-  chunkCount:    0,
+  flowId:         null,
+  lastSeq:        0,
+  attempt:        1,
+  streamReader:   null,   // active ReadableStreamDefaultReader, cancelled on reset
+  abortStream:    false,  // abort flag for consumeStream loop
+  artifacts:      {},     // stage key -> text
+  stageStatus:    {},     // stage key -> 'idle'|'active'|'done'
+  execSummary:    '',
+  totalAttempts:  1,
+  chunkCount:     0,
+  _approvalTimer: null,   // setTimeout handle for approval button re-enable (cleared on reset)
 };
 
 // ---- DOM helpers ----
@@ -1809,7 +1811,7 @@ function processChunk(chunk) {
       // Clear flowId so a retry with a new request_id doesn't inherit stale state.
       // The user must supply a fresh request_id to avoid a 409 from the platform.
       S.flowId = null;
-      S.pollAbort = true;
+      S.abortStream = true;
       $('btnRun').disabled = false;
       $('btnRunLabel').textContent = 'Run Pipeline';
       showView('input');
@@ -1857,11 +1859,16 @@ function showCompletedView() {
 // the awaiting_approval gate, S.flowId is always set and ready for the
 // PATCH /api/approval X-Flow-ID header.
 //
+// The HTTP connection stays open across onix.wait_for_condition suspension.
+// When PATCH /api/approval sends the signal and unblocks the workflow, the
+// platform resumes delivering chunks on this same response body — no polling,
+// no reconnection needed.
+//
 // Wire format:
 //   event:message\ndata:{json}\n\n   — or plain NDJSON, one JSON object per line
 //   event:message\ndata:STREAM_COMPLETED\n\n
 async function consumeStream(resp) {
-  S.pollAbort = false;
+  S.abortStream = false;
 
   const reader  = resp.body.getReader();
   S.streamReader = reader;
@@ -1871,7 +1878,7 @@ async function consumeStream(resp) {
   $('sidebarLiveLabel').textContent = 'Streaming…';
 
   try {
-    while (!S.pollAbort) {
+    while (!S.abortStream) {
       const { done, value } = await reader.read();
 
       if (done) {
@@ -1892,11 +1899,11 @@ async function consumeStream(resp) {
         const line = _extractSseLine(part.trim());
         if (!line) continue;
         const terminal = _handleSseLine(line);
-        if (terminal || S.pollAbort) return;
+        if (terminal || S.abortStream) return;
       }
     }
   } catch (e) {
-    if (S.pollAbort) return;
+    if (S.abortStream) return;
     console.warn('ResearchBot: stream read error:', e.message);
     showErr('inputError', `Stream read error: ${e.message}`);
     setStatus('dot-ruby', 'Stream error');
@@ -1988,7 +1995,7 @@ async function startPipeline() {
       method:  'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-Flow-ID':    `research:${requestId}`,
+        'X-Flow-ID':    `research:${requestId}`
       },
       body:    JSON.stringify({ request_id: requestId, abstract, gemini_api_key: apiKey }),
     });
@@ -2008,17 +2015,17 @@ async function startPipeline() {
     // will confirm it when the first chunk arrives (and overwrite if different).
     const provisionalFlowId = `research:${requestId}`;
     Object.assign(S, {
-      flowId:      provisionalFlowId,
-      lastSeq:     0,
-      attempt:     1,
-      streamReader: null,
-      pollAbort:   false,
-      artifacts:   {},
-      stageStatus: {},
-      execSummary: '',
+      flowId:        provisionalFlowId,
+      lastSeq:       0,
+      attempt:       1,
+      streamReader:  null,
+      abortStream:   false,
+      artifacts:     {},
+      stageStatus:   {},
+      execSummary:   '',
       totalAttempts: 1,
-      chunkCount:  0,
-      _pollTimer:  null,
+      chunkCount:    0,
+      _approvalTimer: null,
     });
 
     // Prime stage statuses
@@ -2089,8 +2096,11 @@ async function submitApproval(approved) {
     } catch (_) {}
     if (!resp.ok) throw new Error(data.error || data.message || `HTTP ${resp.status}`);
 
-    // Re-enable after short delay (in case approval_received chunk hasn't arrived yet)
-    setTimeout(() => {
+    // Re-enable after short delay (in case approval_received chunk hasn't arrived yet).
+    // Store the handle so resetAll() can cancel it if the user resets before it fires.
+    if (S._approvalTimer) clearTimeout(S._approvalTimer);
+    S._approvalTimer = setTimeout(() => {
+      S._approvalTimer = null;
       $('btnApprove').disabled = false;
       $('btnReject').disabled  = false;
     }, 4000);
@@ -2104,9 +2114,10 @@ async function submitApproval(approved) {
 
 // ---- Reset ----
 function resetAll() {
-  // Abort the polling loop and cancel any pending timer.
-  S.pollAbort = true;
-  if (S._pollTimer) { clearTimeout(S._pollTimer); S._pollTimer = null; }
+  // Abort the stream reader loop.
+  S.abortStream = true;
+  // Cancel the approval button re-enable timer if it's pending.
+  if (S._approvalTimer) { clearTimeout(S._approvalTimer); S._approvalTimer = null; }
   // Cancel the live stream reader if one is still active (belt-and-suspenders).
   if (S.streamReader) {
     try { S.streamReader.cancel(); } catch (_) {}
@@ -2114,9 +2125,9 @@ function resetAll() {
   }
   Object.assign(S, {
     flowId: null, lastSeq: 0, attempt: 1,
-    streamReader: null,
-    pollAbort: false,
-    _pollTimer: null,
+    streamReader:   null,
+    abortStream:    false,
+    _approvalTimer: null,
     artifacts: {}, stageStatus: {},
     execSummary: '', totalAttempts: 1, chunkCount: 0,
   });

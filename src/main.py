@@ -26,9 +26,11 @@ import onix
 
 # ---------------------------------------------------------------------------
 # Global approval registry
-# Keyed by flow_id (equals raw request_id — the Temporal workflow ID).
+# Keyed by flow_id — format "research:{request_id}" (the Temporal workflow ID).
 # Written exclusively by the @onix.signal submit_approval.
 # Read exclusively by onix.wait_for_condition inside run_research_pipeline.
+# Signals share execution context with their parent flow, so both the signal
+# and the flow operate on the same in-process global state.
 # Replayed deterministically by Temporal's event-sourced execution model.
 # ---------------------------------------------------------------------------
 _approval_registry: dict = {}
@@ -39,7 +41,6 @@ _approval_registry: dict = {}
 # ---------------------------------------------------------------------------
 _GEMINI_ENDPOINT = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
-    # "gemini-3-flash-preview:generateContent"
     "gemini-2.5-flash-lite:generateContent"
 )
 _GEMINI_MODEL_LABEL = "gemini"
@@ -118,10 +119,11 @@ def _gemini_generate(gemini_api_key: str, prompt: str) -> str:
     """
     gemini-2.5-flash-lite synchronous request.
 
-    Design preserved:
+    Design:
     - stdlib urllib only (WASM safe)
-    - fully buffered
-    - raises on HTTP or schema error
+    - fully buffered response
+    - raises RuntimeError on HTTP error (with Gemini's response body included)
+    - raises on schema error
     """
 
     payload = {
@@ -132,7 +134,7 @@ def _gemini_generate(gemini_api_key: str, prompt: str) -> str:
         ],
         "generationConfig": {
             "temperature": 0.3,
-            "maxOutputTokens": 2048,
+            "maxOutputTokens": 4096,
             "topP": 0.9,
         },
     }
@@ -149,8 +151,24 @@ def _gemini_generate(gemini_api_key: str, prompt: str) -> str:
         method="POST",
     )
 
-    with urllib.request.urlopen(request) as response:
-        raw = response.read().decode("utf-8")
+    try:
+        with urllib.request.urlopen(request) as response:
+            raw = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        # Capture the Gemini error response body for actionable error messages.
+        # Common bodies: {"error":{"code":400,"message":"API key not valid..."}}
+        error_body = ""
+        try:
+            error_body = exc.read().decode("utf-8")
+        except Exception:
+            pass
+        raise RuntimeError(
+            f"Gemini API HTTP {exc.code} {exc.reason}. Body: {error_body[:500]}"
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(
+            f"Gemini API connection error: {exc.reason}"
+        ) from exc
 
     parsed = json.loads(raw)
 
@@ -184,7 +202,7 @@ def _gemini_generate(gemini_api_key: str, prompt: str) -> str:
 #   - Accepts gemini_api_key; never hardcodes credentials.
 #   - Calls Gemini via _gemini_generate with a stage-specific prompt.
 #   - Fully buffers and returns the response text.
-#   - Raises on failure; platform handles retry.
+#   - Never lets exceptions escape (compute error contract above).
 #   - Must NOT call other compute functions or flows.
 # ---------------------------------------------------------------------------
 
@@ -222,7 +240,7 @@ def evidence_extraction(
     """
     Stage 2 — Evidence Extraction.
     Extracts all evidence claims with strength, source type, and confidence.
-    Accepts structural decomposition from stage 1.
+    Accepts structural decomposition from stage 1 as context.
     """
     prompt = (
         "You are a rigorous research analyst performing evidence extraction.\n\n"
@@ -253,7 +271,7 @@ def risk_analysis(
     """
     Stage 3 — Risk Analysis.
     Identifies methodological, bias, generalizability, and replication risks.
-    Accepts evidence extraction output from stage 2.
+    Accepts evidence extraction output from stage 2 as context.
     """
     prompt = (
         "You are a critical research evaluator performing risk analysis.\n\n"
@@ -285,7 +303,7 @@ def comparative_context_generation(
     """
     Stage 4 — Comparative Context Generation.
     Positions the research relative to established findings and academic landscape.
-    Accepts risk analysis output from stage 3.
+    Accepts risk analysis output from stage 3 as context.
     """
     prompt = (
         "You are a research contextualization expert generating comparative context.\n\n"
@@ -389,13 +407,14 @@ def refined_executive_summary_synthesis(
 # operationId in server.yaml MUST match function name exactly: submit_approval
 #
 # The endpoint is PATCH /api/approval.
-# flow_id is supplied by the caller in the X-Flow-ID request header — NOT in
-# the request body. The platform extracts the header value and passes it to
-# this function as the flow_id keyword argument, then delivers it as a signal
-# to the workflow identified by that flow_id.
+# The platform routes the signal to the workflow identified by the X-Flow-ID
+# request header. The signal function's parameters are populated from the
+# request body: flow_id, approved, and critique map directly to the three
+# keyword arguments below.
 #
 # Mutates _approval_registry global in-memory state.
-# The parent flow polls this state via onix.wait_for_condition.
+# Signals share execution context with their parent flow, so the flow's
+# onix.wait_for_condition lambda can read this same global immediately.
 #
 # MUST NOT be wrapped in a flow.
 # MUST NOT spawn new flows.
@@ -405,12 +424,13 @@ def refined_executive_summary_synthesis(
 @onix.signal
 def submit_approval(flow_id: str, approved: bool, critique: str) -> None:
     """
-    Receive human approval decision for the given flow.
+    Receive human approval decision for the given workflow.
     Writes approval state into _approval_registry keyed by flow_id.
     The orchestrating flow unblocks when it detects its flow_id present.
 
-    Signal payload:
-      flow_id  — sourced from X-Flow-ID request header; format "research:{request_id}"
+    Parameters (all sourced from the PATCH /api/approval request body):
+      flow_id  — format "research:{request_id}"; must match the flow_id emitted
+                 in every chunk and supplied in the X-Flow-ID header
       approved — true: pipeline accepted; false: trigger refinement iteration
       critique — human feedback text; used in refinement prompt on rejection
     """
@@ -426,13 +446,15 @@ def submit_approval(flow_id: str, approved: bool, critique: str) -> None:
 # operationId in server.yaml MUST match function name: run_research_pipeline
 #
 # Generator flow: yields streaming chunks that the platform persists to its
-# streaming DB. Chunks are served to the client via GET /api/stream.
-# SDK appends STREAM_COMPLETED sentinel automatically.
-# Developer MUST NOT append STREAM_COMPLETED.
+# streaming DB and delivers to the client via the POST /api/run response body.
+# The HTTP connection stays open across onix.wait_for_condition suspension and
+# resumes delivering chunks when submit_approval unblocks the flow.
+# SDK appends STREAM_COMPLETED sentinel automatically after the generator
+# returns. Developer MUST NOT append STREAM_COMPLETED.
 #
 # flow_id is constructed as "research:{request_id}" — a stable, unique,
-# human-readable identifier embedded in every chunk. The client reads it
-# from the first chunk and uses it verbatim in PATCH /api/approval X-Flow-ID.
+# human-readable identifier embedded in every chunk. The client reads it from
+# the first chunk and uses it verbatim in PATCH /api/approval X-Flow-ID.
 # The signal endpoint routes by this value via the Oryonix signal registry.
 #
 # Sequence counter is local to this invocation; does not rely on DB chunk_id.
