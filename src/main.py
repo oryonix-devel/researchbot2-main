@@ -5,7 +5,32 @@ Service:     main
 Application: researchbot2
 Repository:  researchbot2-main
 
-Pipeline stages (serial, Temporal-durable):
+Architecture: stage-per-child-flow
+  Each of the five pipeline stages runs as an independent @onix.flow (Temporal
+  child workflow), started asynchronously by the main orchestrator. Stages 2–5
+  consume their predecessor's platform stream via onix.Stream to extract the
+  prior result, then call their own @onix.compute.
+
+  Child flow ID scheme (all deterministic from request_id):
+    research:{request_id}:s1  — structural_decomposition_stage
+    research:{request_id}:s2  — evidence_extraction_stage
+    research:{request_id}:s3  — risk_analysis_stage
+    research:{request_id}:s4  — comparative_context_generation_stage
+    research:{request_id}:s5  — executive_summary_synthesis_stage
+
+  The main orchestrator (run_research_pipeline) launches all five child flows
+  then consumes their streams in order, re-yielding every chunk to the client
+  with a globally re-sequenced counter.
+
+  Execution order is serially enforced through stream blocking:
+    s2 blocks on s1 stream → s3 blocks on s2 stream → etc.
+  Even though all five are launched async, they execute in a strict chain.
+
+  Parent-close policy (Temporal default: terminate): if the main flow returns
+  early (pipeline_error), all child workflows are automatically terminated by
+  the platform. No manual cleanup needed.
+
+Pipeline stages (serial chain via stream blocking):
   1. structural_decomposition
   2. evidence_extraction
   3. risk_analysis
@@ -13,6 +38,7 @@ Pipeline stages (serial, Temporal-durable):
   5. executive_summary_synthesis
 
 Human approval gate with unlimited iterative refinement loop.
+Refinement runs directly in the main flow (no child flow needed).
 Streaming via generator-yield; STREAM_COMPLETED appended by SDK automatically.
 All @onix.compute and @onix.flow calls use keyword arguments exclusively.
 """
@@ -44,6 +70,7 @@ _GEMINI_ENDPOINT = (
     "gemini-2.5-flash-lite:generateContent"
 )
 _GEMINI_MODEL_LABEL = "gemini"
+
 
 # ---------------------------------------------------------------------------
 # Compute error contract
@@ -336,7 +363,6 @@ def executive_summary_synthesis(
     """
     Stage 5 — Executive Summary Synthesis (initial attempt).
     Synthesises all prior stage outputs into a decision-ready executive summary.
-    All five prior outputs are passed in.
     """
     prompt = (
         "You are a senior research director producing a definitive executive summary.\n\n"
@@ -369,7 +395,8 @@ def refined_executive_summary_synthesis(
     gemini_api_key: str,
 ) -> str:
     """
-    Refinement compute — called on each rejection iteration.
+    Refinement compute — called on each rejection iteration directly from the
+    main orchestrator flow (not as a child flow).
 
     Per spec §12: feeds ONLY the original abstract, last executive summary,
     and human critique. Does NOT re-feed full prior pipeline output.
@@ -441,25 +468,601 @@ def submit_approval(flow_id: str, approved: bool, critique: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Child stage flows
+#
+# Each stage is an independent @onix.flow (Temporal child workflow).
+# Started asynchronously by run_research_pipeline.
+# Stages 2–5 read their predecessor's stream via onix.Stream to extract
+# the prior result, then call their own @onix.compute.
+#
+# Design rules for every child stage flow:
+#   - flow_id in all emitted chunks is "research:{request_id}" — the MAIN
+#     workflow's ID. This ensures the client sees a single consistent flow_id
+#     across all streamed chunks regardless of which child emitted them.
+#   - attempt is always 1 (child flows run once; refinement runs in main flow).
+#   - sequence counter is local; the main flow overwrites it when re-yielding.
+#   - Never append STREAM_COMPLETED — SDK does this automatically.
+#   - The flow_id kwarg passed at call-site is the child's own Temporal
+#     workflow ID (e.g. "research:{request_id}:s1"). This is a platform SDK
+#     convention (temporary API — will change in a future SDK release) and is
+#     distinct from the flow_id embedded in the chunk payload.
+#   - All calls to computes and flows use keyword arguments exclusively.
+# ---------------------------------------------------------------------------
+
+
+@onix.flow
+def structural_decomposition_stage(request_id: str, abstract: str, gemini_api_key: str):
+    """
+    Stage 1 child flow — Structural Decomposition.
+
+    No predecessor stream. Calls the structural_decomposition compute directly.
+    Yields 4 chunks: started → processing → processing(received) → complete.
+    On compute error yields pipeline_error and returns.
+    """
+    # flow_id in chunks is always the MAIN flow's ID — unified client identity.
+    flow_id: str = f"research:{request_id}"
+    _sequence: int = 0
+    attempt: int = 1
+
+    def _next_seq() -> int:
+        nonlocal _sequence
+        _sequence += 1
+        return _sequence
+
+    def _chunk(stage: str, status: str, artifact: dict) -> dict:
+        return _build_chunk(
+            flow_id=flow_id,
+            sequence=_next_seq(),
+            stage=stage,
+            status=status,
+            attempt=attempt,
+            artifact=artifact,
+        )
+
+    def _error_chunk(failed_stage: str, error_msg: str) -> dict:
+        return _build_chunk(
+            flow_id=flow_id,
+            sequence=_next_seq(),
+            stage="pipeline_error",
+            status="error",
+            attempt=attempt,
+            artifact={
+                "message": (
+                    f"Pipeline failed at stage '{failed_stage}'. "
+                    f"Error: {error_msg}"
+                ),
+                "failed_stage": failed_stage,
+            },
+        )
+
+    yield _chunk(
+        stage="structural_decomposition",
+        status="started",
+        artifact={"message": "Stage 1 of 5: Structural decomposition starting."},
+    )
+    yield _chunk(
+        stage="structural_decomposition",
+        status="processing",
+        artifact={"message": "Dispatching structural decomposition to Gemini."},
+    )
+
+    decomposition: str = structural_decomposition(
+        abstract=abstract,
+        gemini_api_key=gemini_api_key,
+    )
+    if _is_compute_error(decomposition):
+        yield _error_chunk("structural_decomposition", _extract_compute_error(decomposition))
+        return
+
+    yield _chunk(
+        stage="structural_decomposition",
+        status="processing",
+        artifact={"message": "Structural decomposition response received; validating."},
+    )
+    yield _chunk(
+        stage="structural_decomposition",
+        status="complete",
+        artifact={
+            "message": "Structural decomposition complete.",
+            "result": decomposition,
+        },
+    )
+
+
+@onix.flow
+def evidence_extraction_stage(request_id: str, abstract: str, gemini_api_key: str):
+    """
+    Stage 2 child flow — Evidence Extraction.
+
+    Reads the stage 1 stream (research:{request_id}:s1) via onix.Stream,
+    blocking in real-time until structural_decomposition_stage emits its
+    complete chunk. Extracts the decomposition result, then calls the
+    evidence_extraction compute.
+
+    If stage 1's stream ends without a complete chunk (stage 1 failed),
+    emits pipeline_error and returns. The main flow will have already
+    detected stage 1's failure and returned; this child is then terminated
+    by the platform's parent-close policy.
+
+    Yields 4 chunks: started → processing → processing(received) → complete.
+    """
+    flow_id: str = f"research:{request_id}"
+    s1_id: str = f"research:{request_id}:s1"
+    _sequence: int = 0
+    attempt: int = 1
+
+    def _next_seq() -> int:
+        nonlocal _sequence
+        _sequence += 1
+        return _sequence
+
+    def _chunk(stage: str, status: str, artifact: dict) -> dict:
+        return _build_chunk(
+            flow_id=flow_id,
+            sequence=_next_seq(),
+            stage=stage,
+            status=status,
+            attempt=attempt,
+            artifact=artifact,
+        )
+
+    def _error_chunk(failed_stage: str, error_msg: str) -> dict:
+        return _build_chunk(
+            flow_id=flow_id,
+            sequence=_next_seq(),
+            stage="pipeline_error",
+            status="error",
+            attempt=attempt,
+            artifact={
+                "message": (
+                    f"Pipeline failed at stage '{failed_stage}'. "
+                    f"Error: {error_msg}"
+                ),
+                "failed_stage": failed_stage,
+            },
+        )
+
+    # Block on stage 1's stream. Break as soon as the complete chunk arrives.
+    # If stage 1 emitted pipeline_error and terminated without a complete chunk,
+    # the for loop ends naturally and decomposition remains None.
+    decomposition: str = None
+    for chunk in onix.StreamConsumer(stream_type=onix.StreamType.Workflow, args=s1_id):
+        if (
+            chunk.get("stage") == "structural_decomposition"
+            and chunk.get("status") == "complete"
+        ):
+            decomposition = chunk.get("artifact", {}).get("result")
+            break
+
+    if decomposition is None:
+        yield _error_chunk(
+            "evidence_extraction",
+            "Predecessor stage 1 (structural_decomposition) did not produce a result. "
+            "Stage 1 may have failed.",
+        )
+        return
+
+    yield _chunk(
+        stage="evidence_extraction",
+        status="started",
+        artifact={"message": "Stage 2 of 5: Evidence extraction starting."},
+    )
+    yield _chunk(
+        stage="evidence_extraction",
+        status="processing",
+        artifact={"message": "Dispatching evidence extraction to Gemini."},
+    )
+
+    evidence: str = evidence_extraction(
+        abstract=abstract,
+        decomposition=decomposition,
+        gemini_api_key=gemini_api_key,
+    )
+    if _is_compute_error(evidence):
+        yield _error_chunk("evidence_extraction", _extract_compute_error(evidence))
+        return
+
+    yield _chunk(
+        stage="evidence_extraction",
+        status="processing",
+        artifact={"message": "Evidence extraction response received; validating."},
+    )
+    yield _chunk(
+        stage="evidence_extraction",
+        status="complete",
+        artifact={
+            "message": "Evidence extraction complete.",
+            "result": evidence,
+        },
+    )
+
+
+@onix.flow
+def risk_analysis_stage(request_id: str, abstract: str, gemini_api_key: str):
+    """
+    Stage 3 child flow — Risk Analysis.
+
+    Reads the stage 2 stream (research:{request_id}:s2) via onix.Stream,
+    blocking until evidence_extraction_stage emits its complete chunk.
+    Stage 2 itself blocked on stage 1 — so by the time stage 3 unblocks,
+    both stages 1 and 2 have completed. Calls the risk_analysis compute.
+
+    Yields 4 chunks: started → processing → processing(received) → complete.
+    """
+    flow_id: str = f"research:{request_id}"
+    s2_id: str = f"research:{request_id}:s2"
+    _sequence: int = 0
+    attempt: int = 1
+
+    def _next_seq() -> int:
+        nonlocal _sequence
+        _sequence += 1
+        return _sequence
+
+    def _chunk(stage: str, status: str, artifact: dict) -> dict:
+        return _build_chunk(
+            flow_id=flow_id,
+            sequence=_next_seq(),
+            stage=stage,
+            status=status,
+            attempt=attempt,
+            artifact=artifact,
+        )
+
+    def _error_chunk(failed_stage: str, error_msg: str) -> dict:
+        return _build_chunk(
+            flow_id=flow_id,
+            sequence=_next_seq(),
+            stage="pipeline_error",
+            status="error",
+            attempt=attempt,
+            artifact={
+                "message": (
+                    f"Pipeline failed at stage '{failed_stage}'. "
+                    f"Error: {error_msg}"
+                ),
+                "failed_stage": failed_stage,
+            },
+        )
+
+    evidence: str = None
+    for chunk in onix.StreamConsumer(stream_type=onix.StreamType.Workflow, args=s2_id):
+        if (
+            chunk.get("stage") == "evidence_extraction"
+            and chunk.get("status") == "complete"
+        ):
+            evidence = chunk.get("artifact", {}).get("result")
+            break
+
+    if evidence is None:
+        yield _error_chunk(
+            "risk_analysis",
+            "Predecessor stage 2 (evidence_extraction) did not produce a result. "
+            "Stage 2 may have failed.",
+        )
+        return
+
+    yield _chunk(
+        stage="risk_analysis",
+        status="started",
+        artifact={"message": "Stage 3 of 5: Risk analysis starting."},
+    )
+    yield _chunk(
+        stage="risk_analysis",
+        status="processing",
+        artifact={"message": "Dispatching risk analysis to Gemini."},
+    )
+
+    risk: str = risk_analysis(
+        abstract=abstract,
+        evidence=evidence,
+        gemini_api_key=gemini_api_key,
+    )
+    if _is_compute_error(risk):
+        yield _error_chunk("risk_analysis", _extract_compute_error(risk))
+        return
+
+    yield _chunk(
+        stage="risk_analysis",
+        status="processing",
+        artifact={"message": "Risk analysis response received; validating."},
+    )
+    yield _chunk(
+        stage="risk_analysis",
+        status="complete",
+        artifact={
+            "message": "Risk analysis complete.",
+            "result": risk,
+        },
+    )
+
+
+@onix.flow
+def comparative_context_generation_stage(request_id: str, abstract: str, gemini_api_key: str):
+    """
+    Stage 4 child flow — Comparative Context Generation.
+
+    Reads the stage 3 stream (research:{request_id}:s3) via onix.Stream,
+    blocking until risk_analysis_stage emits its complete chunk.
+    Calls the comparative_context_generation compute.
+
+    Yields 4 chunks: started → processing → processing(received) → complete.
+    """
+    flow_id: str = f"research:{request_id}"
+    s3_id: str = f"research:{request_id}:s3"
+    _sequence: int = 0
+    attempt: int = 1
+
+    def _next_seq() -> int:
+        nonlocal _sequence
+        _sequence += 1
+        return _sequence
+
+    def _chunk(stage: str, status: str, artifact: dict) -> dict:
+        return _build_chunk(
+            flow_id=flow_id,
+            sequence=_next_seq(),
+            stage=stage,
+            status=status,
+            attempt=attempt,
+            artifact=artifact,
+        )
+
+    def _error_chunk(failed_stage: str, error_msg: str) -> dict:
+        return _build_chunk(
+            flow_id=flow_id,
+            sequence=_next_seq(),
+            stage="pipeline_error",
+            status="error",
+            attempt=attempt,
+            artifact={
+                "message": (
+                    f"Pipeline failed at stage '{failed_stage}'. "
+                    f"Error: {error_msg}"
+                ),
+                "failed_stage": failed_stage,
+            },
+        )
+
+    risk: str = None
+    for chunk in onix.StreamConsumer(stream_type=onix.StreamType.Workflow, args=s3_id):
+        if (
+            chunk.get("stage") == "risk_analysis"
+            and chunk.get("status") == "complete"
+        ):
+            risk = chunk.get("artifact", {}).get("result")
+            break
+
+    if risk is None:
+        yield _error_chunk(
+            "comparative_context_generation",
+            "Predecessor stage 3 (risk_analysis) did not produce a result. "
+            "Stage 3 may have failed.",
+        )
+        return
+
+    yield _chunk(
+        stage="comparative_context_generation",
+        status="started",
+        artifact={"message": "Stage 4 of 5: Comparative context generation starting."},
+    )
+    yield _chunk(
+        stage="comparative_context_generation",
+        status="processing",
+        artifact={"message": "Dispatching comparative context generation to Gemini."},
+    )
+
+    context: str = comparative_context_generation(
+        abstract=abstract,
+        risk=risk,
+        gemini_api_key=gemini_api_key,
+    )
+    if _is_compute_error(context):
+        yield _error_chunk("comparative_context_generation", _extract_compute_error(context))
+        return
+
+    yield _chunk(
+        stage="comparative_context_generation",
+        status="processing",
+        artifact={"message": "Comparative context response received; validating."},
+    )
+    yield _chunk(
+        stage="comparative_context_generation",
+        status="complete",
+        artifact={
+            "message": "Comparative context generation complete.",
+            "result": context,
+        },
+    )
+
+
+@onix.flow
+def executive_summary_synthesis_stage(request_id: str, abstract: str, gemini_api_key: str):
+    """
+    Stage 5 child flow — Executive Summary Synthesis.
+
+    Reads predecessor streams for all four prior stages to collect results.
+    Reading order: s1, s2, s3, s4.
+
+    Streams s1, s2, s3 are already-completed durable streams by the time this
+    flow reads them (because s4 cannot complete until s3 completes, s3 until s2,
+    s2 until s1). Reading s4 last is therefore the only real blocking operation.
+
+    Then calls executive_summary_synthesis with all four prior results.
+
+    Yields 4 chunks: started → processing → processing(received) → complete.
+    On any missing predecessor result or compute error yields pipeline_error.
+    """
+    flow_id: str = f"research:{request_id}"
+    s1_id: str = f"research:{request_id}:s1"
+    s2_id: str = f"research:{request_id}:s2"
+    s3_id: str = f"research:{request_id}:s3"
+    s4_id: str = f"research:{request_id}:s4"
+    _sequence: int = 0
+    attempt: int = 1
+
+    def _next_seq() -> int:
+        nonlocal _sequence
+        _sequence += 1
+        return _sequence
+
+    def _chunk(stage: str, status: str, artifact: dict) -> dict:
+        return _build_chunk(
+            flow_id=flow_id,
+            sequence=_next_seq(),
+            stage=stage,
+            status=status,
+            attempt=attempt,
+            artifact=artifact,
+        )
+
+    def _error_chunk(failed_stage: str, error_msg: str) -> dict:
+        return _build_chunk(
+            flow_id=flow_id,
+            sequence=_next_seq(),
+            stage="pipeline_error",
+            status="error",
+            attempt=attempt,
+            artifact={
+                "message": (
+                    f"Pipeline failed at stage '{failed_stage}'. "
+                    f"Error: {error_msg}"
+                ),
+                "failed_stage": failed_stage,
+            },
+        )
+
+    # s1: instant replay (always done before s4).
+    decomposition: str = None
+    for chunk in onix.StreamConsumer(stream_type=onix.StreamType.Workflow, args=s1_id):
+        if (
+            chunk.get("stage") == "structural_decomposition"
+            and chunk.get("status") == "complete"
+        ):
+            decomposition = chunk.get("artifact", {}).get("result")
+            break
+
+    # s2: instant replay.
+    evidence: str = None
+    for chunk in onix.StreamConsumer(stream_type=onix.StreamType.Workflow, args=s2_id):
+        if (
+            chunk.get("stage") == "evidence_extraction"
+            and chunk.get("status") == "complete"
+        ):
+            evidence = chunk.get("artifact", {}).get("result")
+            break
+
+    # s3: instant replay.
+    risk: str = None
+    for chunk in onix.StreamConsumer(stream_type=onix.StreamType.Workflow, args=s3_id):
+        if (
+            chunk.get("stage") == "risk_analysis"
+            and chunk.get("status") == "complete"
+        ):
+            risk = chunk.get("artifact", {}).get("result")
+            break
+
+    # s4: the real blocking read — waits for comparative_context_generation_stage.
+    context: str = None
+    for chunk in onix.StreamConsumer(stream_type=onix.StreamType.Workflow, args=s4_id):
+        if (
+            chunk.get("stage") == "comparative_context_generation"
+            and chunk.get("status") == "complete"
+        ):
+            context = chunk.get("artifact", {}).get("result")
+            break
+
+    # All four must be present. If any predecessor failed its stream ends
+    # without a complete chunk and its result is None.
+    missing = [
+        name
+        for name, val in [
+            ("decomposition", decomposition),
+            ("evidence", evidence),
+            ("risk", risk),
+            ("context", context),
+        ]
+        if val is None
+    ]
+    if missing:
+        yield _error_chunk(
+            "executive_summary_synthesis",
+            f"Missing predecessor results: {', '.join(missing)}. "
+            "One or more upstream stages may have failed.",
+        )
+        return
+
+    yield _chunk(
+        stage="executive_summary_synthesis",
+        status="started",
+        artifact={"message": "Stage 5 of 5: Executive summary synthesis starting."},
+    )
+    yield _chunk(
+        stage="executive_summary_synthesis",
+        status="processing",
+        artifact={"message": "Dispatching executive summary synthesis to Gemini."},
+    )
+
+    summary: str = executive_summary_synthesis(
+        abstract=abstract,
+        decomposition=decomposition,
+        evidence=evidence,
+        risk=risk,
+        context=context,
+        gemini_api_key=gemini_api_key,
+    )
+    if _is_compute_error(summary):
+        yield _error_chunk("executive_summary_synthesis", _extract_compute_error(summary))
+        return
+
+    yield _chunk(
+        stage="executive_summary_synthesis",
+        status="processing",
+        artifact={"message": "Executive summary response received; validating."},
+    )
+    yield _chunk(
+        stage="executive_summary_synthesis",
+        status="complete",
+        artifact={
+            "message": "Executive summary synthesis complete.",
+            "result": summary,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
 # Flow — Primary pipeline orchestrator
 #
 # operationId in server.yaml MUST match function name: run_research_pipeline
 #
-# Generator flow: yields streaming chunks that the platform persists to its
-# streaming DB and delivers to the client via the POST /api/run response body.
-# The HTTP connection stays open across onix.wait_for_condition suspension and
-# resumes delivering chunks when submit_approval unblocks the flow.
+# Launches all five stage child flows asynchronously, then consumes their
+# streams in order, re-yielding every chunk to the client with a globally
+# re-sequenced counter. The HTTP connection (POST /api/run response body)
+# stays open across onix.wait_for_condition suspension and resumes delivering
+# chunks when submit_approval unblocks the flow.
 # SDK appends STREAM_COMPLETED sentinel automatically after the generator
 # returns. Developer MUST NOT append STREAM_COMPLETED.
 #
-# flow_id is constructed as "research:{request_id}" — a stable, unique,
-# human-readable identifier embedded in every chunk. The client reads it from
-# the first chunk and uses it verbatim in PATCH /api/approval X-Flow-ID.
-# The signal endpoint routes by this value via the Oryonix signal registry.
+# Child flow ID scheme (derived deterministically from request_id):
+#   s1_id = research:{request_id}:s1  — structural_decomposition_stage
+#   s2_id = research:{request_id}:s2  — evidence_extraction_stage
+#   s3_id = research:{request_id}:s3  — risk_analysis_stage
+#   s4_id = research:{request_id}:s4  — comparative_context_generation_stage
+#   s5_id = research:{request_id}:s5  — executive_summary_synthesis_stage
 #
-# Sequence counter is local to this invocation; does not rely on DB chunk_id.
+# flow_id (the main workflow ID) = "research:{request_id}".
+# This is what the client receives in every chunk and sends back verbatim
+# in the PATCH /api/approval X-Flow-ID header.
+#
+# The flow_id kwarg on each child flow call is a temporary SDK API for
+# specifying the child's Temporal workflow ID. This will change in a future
+# SDK release.
+#
+# Platform parent-close policy (terminate): if this flow returns early on
+# pipeline_error, all child workflows are automatically terminated. No manual
+# cancellation logic needed.
+#
 # All compute and flow calls use keyword arguments exclusively.
-# No parallelisation — stages execute strictly serially.
 # ---------------------------------------------------------------------------
 
 @onix.flow
@@ -468,25 +1071,33 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
     Orchestrate the full research evaluation pipeline.
 
     Execution model:
-      1. Run five serial pipeline stage compute functions.
-      2. Yield streaming chunks after each stage (and sub-steps within stages).
-      3. Block at the human approval gate via onix.wait_for_condition.
-      4. On approval -> emit final chunk and return.
-      5. On rejection -> increment attempt, call refinement compute, loop.
-      6. Loop is unlimited; no attempt cap.
+      1. Emit pipeline_started chunk.
+      2. Launch all five stage child flows asynchronously via keyword flow_id.
+         Stages 2–5 immediately block on their predecessor's stream; effective
+         execution is serial despite async launch.
+      3. Consume each child's stream in pipeline order, re-yielding chunks to
+         the client with a globally re-sequenced counter. Abort on pipeline_error.
+      4. Confirm all child workflows have completed via onix.wait_all.
+      5. Block at the human approval gate via onix.wait_for_condition.
+      6. On approval -> emit final chunks and return.
+      7. On rejection -> increment attempt, call refinement compute directly,
+         loop back to approval gate. Loop is unlimited; no attempt cap.
     """
 
-    # flow_id is a stable, unique identifier for this pipeline run.
-    # Constructed from request_id so it is deterministic and human-readable.
-    # Embedded in every chunk; the client reads it from the first chunk and
-    # sends it back verbatim in the PATCH /api/approval X-Flow-ID header.
+    # Main workflow's stable identity — embedded in every chunk.
     flow_id: str = f"research:{request_id}"
 
-    # Local sequence counter — authoritative ordering for this stream.
-    # Never derived from DB chunk_id; never assumed contiguous externally.
+    # Deterministic child workflow IDs.
+    s1_id: str = f"research:{request_id}:s1"
+    s2_id: str = f"research:{request_id}:s2"
+    s3_id: str = f"research:{request_id}:s3"
+    s4_id: str = f"research:{request_id}:s4"
+    s5_id: str = f"research:{request_id}:s5"
+
+    # Global sequence counter — authoritative ordering for the client stream.
     _sequence: int = 0
 
-    # Attempt counter — starts at 1 for the initial pipeline execution.
+    # Attempt counter — starts at 1 for the initial pipeline run.
     attempt: int = 1
 
     # ------------------------------------------------------------------
@@ -539,196 +1150,96 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
     )
 
     # ==================================================================
-    # STAGE 1 — Structural Decomposition
+    # Launch all five child stage flows asynchronously.
+    #
+    # The flow_id kwarg sets each child's Temporal workflow ID. This is a
+    # temporary SDK API — it will change in a future SDK release.
+    #
+    # Stages 2–5 will immediately block on their predecessor's platform
+    # stream. Effective execution order is serial (s1 → s2 → s3 → s4 → s5)
+    # enforced through stream blocking, not through sequential launching.
+    #
+    # Handles are stored for onix.wait_all after stream consumption.
     # ==================================================================
 
-    yield _chunk(
-        stage="structural_decomposition",
-        status="started",
-        artifact={"message": "Stage 1 of 5: Structural decomposition starting."},
-    )
-    yield _chunk(
-        stage="structural_decomposition",
-        status="processing",
-        artifact={"message": "Dispatching structural decomposition to Gemini."},
-    )
-
-    decomposition: str = structural_decomposition(
+    h1 = structural_decomposition_stage(
+        request_id=request_id,
         abstract=abstract,
         gemini_api_key=gemini_api_key,
+        flow_id=s1_id,
     )
-    if _is_compute_error(decomposition):
-        yield _error_chunk("structural_decomposition", _extract_compute_error(decomposition))
-        return
-
-    yield _chunk(
-        stage="structural_decomposition",
-        status="processing",
-        artifact={"message": "Structural decomposition response received; validating."},
-    )
-    yield _chunk(
-        stage="structural_decomposition",
-        status="complete",
-        artifact={
-            "message": "Structural decomposition complete.",
-            "result": decomposition,
-        },
-    )
-
-    # ==================================================================
-    # STAGE 2 — Evidence Extraction
-    # ==================================================================
-
-    yield _chunk(
-        stage="evidence_extraction",
-        status="started",
-        artifact={"message": "Stage 2 of 5: Evidence extraction starting."},
-    )
-    yield _chunk(
-        stage="evidence_extraction",
-        status="processing",
-        artifact={"message": "Dispatching evidence extraction to Gemini."},
-    )
-
-    evidence: str = evidence_extraction(
+    h2 = evidence_extraction_stage(
+        request_id=request_id,
         abstract=abstract,
-        decomposition=decomposition,
         gemini_api_key=gemini_api_key,
+        flow_id=s2_id,
     )
-    if _is_compute_error(evidence):
-        yield _error_chunk("evidence_extraction", _extract_compute_error(evidence))
-        return
-
-    yield _chunk(
-        stage="evidence_extraction",
-        status="processing",
-        artifact={"message": "Evidence extraction response received; validating."},
-    )
-    yield _chunk(
-        stage="evidence_extraction",
-        status="complete",
-        artifact={
-            "message": "Evidence extraction complete.",
-            "result": evidence,
-        },
-    )
-
-    # ==================================================================
-    # STAGE 3 — Risk Analysis
-    # ==================================================================
-
-    yield _chunk(
-        stage="risk_analysis",
-        status="started",
-        artifact={"message": "Stage 3 of 5: Risk analysis starting."},
-    )
-    yield _chunk(
-        stage="risk_analysis",
-        status="processing",
-        artifact={"message": "Dispatching risk analysis to Gemini."},
-    )
-
-    risk: str = risk_analysis(
+    h3 = risk_analysis_stage(
+        request_id=request_id,
         abstract=abstract,
-        evidence=evidence,
         gemini_api_key=gemini_api_key,
+        flow_id=s3_id,
     )
-    if _is_compute_error(risk):
-        yield _error_chunk("risk_analysis", _extract_compute_error(risk))
-        return
-
-    yield _chunk(
-        stage="risk_analysis",
-        status="processing",
-        artifact={"message": "Risk analysis response received; validating."},
-    )
-    yield _chunk(
-        stage="risk_analysis",
-        status="complete",
-        artifact={
-            "message": "Risk analysis complete.",
-            "result": risk,
-        },
-    )
-
-    # ==================================================================
-    # STAGE 4 — Comparative Context Generation
-    # ==================================================================
-
-    yield _chunk(
-        stage="comparative_context_generation",
-        status="started",
-        artifact={"message": "Stage 4 of 5: Comparative context generation starting."},
-    )
-    yield _chunk(
-        stage="comparative_context_generation",
-        status="processing",
-        artifact={"message": "Dispatching comparative context generation to Gemini."},
-    )
-
-    context: str = comparative_context_generation(
+    h4 = comparative_context_generation_stage(
+        request_id=request_id,
         abstract=abstract,
-        risk=risk,
         gemini_api_key=gemini_api_key,
+        flow_id=s4_id,
     )
-    if _is_compute_error(context):
-        yield _error_chunk("comparative_context_generation", _extract_compute_error(context))
-        return
-
-    yield _chunk(
-        stage="comparative_context_generation",
-        status="processing",
-        artifact={"message": "Comparative context response received; validating."},
-    )
-    yield _chunk(
-        stage="comparative_context_generation",
-        status="complete",
-        artifact={
-            "message": "Comparative context generation complete.",
-            "result": context,
-        },
-    )
-
-    # ==================================================================
-    # STAGE 5 — Executive Summary Synthesis (initial)
-    # ==================================================================
-
-    yield _chunk(
-        stage="executive_summary_synthesis",
-        status="started",
-        artifact={"message": "Stage 5 of 5: Executive summary synthesis starting."},
-    )
-    yield _chunk(
-        stage="executive_summary_synthesis",
-        status="processing",
-        artifact={"message": "Dispatching executive summary synthesis to Gemini."},
-    )
-
-    summary: str = executive_summary_synthesis(
+    h5 = executive_summary_synthesis_stage(
+        request_id=request_id,
         abstract=abstract,
-        decomposition=decomposition,
-        evidence=evidence,
-        risk=risk,
-        context=context,
         gemini_api_key=gemini_api_key,
+        flow_id=s5_id,
     )
-    if _is_compute_error(summary):
-        yield _error_chunk("executive_summary_synthesis", _extract_compute_error(summary))
-        return
 
-    yield _chunk(
-        stage="executive_summary_synthesis",
-        status="processing",
-        artifact={"message": "Executive summary response received; validating."},
-    )
-    yield _chunk(
-        stage="executive_summary_synthesis",
-        status="complete",
-        artifact={
-            "message": "Executive summary synthesis complete.",
-            "result": summary,
-        },
-    )
+    # ==================================================================
+    # Consume and re-yield chunks from each child flow in pipeline order.
+    #
+    # Every chunk is shallow-copied and its sequence field is overwritten
+    # with the main flow's global counter. All other fields (flow_id, stage,
+    # status, attempt, artifact, model, timestamp) are preserved as emitted
+    # by the child.
+    #
+    # On pipeline_error: return immediately. The platform terminates all
+    # remaining child workflows via parent-close policy (terminate).
+    #
+    # summary is captured inline when stage 5's complete chunk passes through.
+    # ==================================================================
+
+    summary: str = None
+    pipeline_failed: bool = False
+
+    for child_stream_id in [s1_id, s2_id, s3_id, s4_id, s5_id]:
+        consumer = onix.StreamConsumer(
+            stream_type=onix.StreamType.Workflow,
+            args=child_stream_id,
+        )
+        for chunk in consumer:
+            chunk = dict(chunk)
+            chunk["sequence"] = _next_seq()
+            yield chunk
+
+            if chunk.get("stage") == "pipeline_error":
+                pipeline_failed = True
+                break
+
+            if (
+                chunk.get("stage") == "executive_summary_synthesis"
+                and chunk.get("status") == "complete"
+            ):
+                summary = chunk.get("artifact", {}).get("result", "")
+
+        if pipeline_failed:
+            return
+
+    # ==================================================================
+    # All five stage streams consumed. Confirm child workflows are done.
+    # At this point all streams have been read to completion so wait_all
+    # returns immediately — it is a correctness guarantee, not a wait.
+    # ==================================================================
+
+    onix.wait_all(handles=[h1, h2, h3, h4, h5])
 
     # ==================================================================
     # HUMAN APPROVAL GATE — Iterative refinement loop
@@ -749,7 +1260,7 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
             },
         )
 
-        onix.wait_for_condition(lambda: flow_id in _approval_registry)
+        onix.wait_for_condition(lambda fid=flow_id: fid in _approval_registry)
 
         approval_record: dict = _approval_registry.pop(flow_id)
         approved: bool = approval_record["approved"]
@@ -830,7 +1341,10 @@ def run_research_pipeline(request_id: str, abstract: str, gemini_api_key: str):
             gemini_api_key=gemini_api_key,
         )
         if _is_compute_error(summary):
-            yield _error_chunk("refined_executive_summary_synthesis", _extract_compute_error(summary))
+            yield _error_chunk(
+                "refined_executive_summary_synthesis",
+                _extract_compute_error(summary),
+            )
             return
 
         yield _chunk(
